@@ -157,14 +157,14 @@ Sinon réponds normalement en français.`
   },
   email: {
     emoji: "📧", name: "Agent Email",
-    system: `Tu es un assistant de gestion d'emails Gmail. Tu peux :
-- Lire les emails non lus
-- Rédiger et envoyer des emails
-Quand l'utilisateur veut envoyer un email, collecte destinataire, objet et contenu puis réponds EXACTEMENT avec ce JSON:
-{"action":"send_email","to":"email@example.com","subject":"objet","body":"contenu"}
-Quand l'utilisateur veut lire ses emails, réponds EXACTEMENT avec ce JSON:
+    system: `Tu es un assistant de gestion d'emails Gmail.
+RÈGLE ABSOLUE : quand l'utilisateur veut lire ses emails, tu réponds UNIQUEMENT avec exactement ce texte, sans aucune explication :
 {"action":"read_emails"}
-Sinon réponds normalement en français.`
+RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos, tu réponds UNIQUEMENT avec exactement ce texte :
+{"action":"send_email","to":"email","subject":"objet","body":"contenu"}
+Si tu n'as pas toutes les infos pour envoyer, demande-les en français.
+Pour toute autre demande, réponds normalement en français.
+NE JAMAIS expliquer le fonctionnement technique. NE JAMAIS dire que tu ne peux pas exécuter des actions.`
   }
 };
 
