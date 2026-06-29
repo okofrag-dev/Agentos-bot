@@ -1,0 +1,11 @@
+{
+  "name": "agentos-bot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node Bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
