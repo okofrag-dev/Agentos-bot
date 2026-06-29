@@ -145,6 +145,12 @@ async function handleUpdate(update) {
 
 let offset = 0;
 async function poll() {
+  if (offset === 0) {
+    try {
+      const init = await apiCall("getUpdates", { offset: -1 });
+      if (init.result?.length) offset = init.result[init.result.length - 1].update_id + 1;
+    } catch(e) {}
+  }
   try {
     const res = await apiCall("getUpdates", { offset, timeout: 30, allowed_updates: ["message", "callback_query"] });
     if (res.result?.length) {
