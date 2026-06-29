@@ -1,90 +1,116 @@
 const https = require("https");
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "VOTRE_TOKEN_ICI";
-const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY || "VOTRE_CLE_ANTHROPIC_ICI";
-const BASE_URL       = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
+const TOKEN = process.env.TELEGRAM_TOKEN;
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 
-const AGENTS = {
-  temps: {
-    emoji: "🗓️",
-    name: "Agent Temps",
-    system: `Tu es un assistant spécialisé en gestion du temps. Tu aides l'utilisateur à planifier ses journées, gérer son agenda, fixer des rappels et optimiser son emploi du temps. Tu es concis, pratique et proactif. Réponds toujours en français. Garde tes réponses courtes et structurées (adapté à Telegram).`,
-  },
-  social: {
-    emoji: "📣",
-    name: "Agent Social",
-    system: `Tu es un expert en réseaux sociaux et marketing de contenu. Tu rédiges des posts engageants pour LinkedIn, Instagram, X et TikTok, planifies des publications et analyses les performances. Tu es créatif et orienté résultats. Réponds toujours en français. Garde tes réponses courtes et structurées (adapté à Telegram).`,
-  },
-  stock: {
-    emoji: "📦",
-    name: "Agent Stock",
-    system: `Tu es un gestionnaire d'inventaire et de stocks. Tu surveilles les niveaux de stock, alertes sur les ruptures, prépares des commandes de réapprovisionnement et analyses les tendances. Tu es précis, chiffré et efficace. Réponds toujours en français. Garde tes réponses courtes et structurées (adapté à Telegram).`,
-  },
-};
+console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
 
-const userState = {};
-function getState(chatId) {
-  if (!userState[chatId]) userState[chatId] = { agent: null, history: [] };
-  return userState[chatId];
-}
-
-function apiCall(method, body) {
+function telegramRequest(method, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
-    const req = https.request(
-      { hostname: "api.telegram.org", path: `/bot${TELEGRAM_TOKEN}/${method}`, method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) } },
-      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => resolve(JSON.parse(d))); }
-    );
+    const options = {
+      hostname: "api.telegram.org",
+      path: `/bot${TOKEN}/${method}`,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(data)
+      }
+    };
+    const req = https.request(options, (res) => {
+      let body = "";
+      res.on("data", chunk => body += chunk);
+      res.on("end", () => {
+        try { resolve(JSON.parse(body)); }
+        catch (e) { reject(e); }
+      });
+    });
     req.on("error", reject);
     req.write(data);
     req.end();
   });
 }
 
-function sendMessage(chatId, text, extra = {}) {
-  return apiCall("sendMessage", { chat_id: chatId, text, parse_mode: "Markdown", ...extra });
+function sendMessage(chatId, text) {
+  console.log("Envoi message à", chatId, ":", text.substring(0, 50));
+  return telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: text,
+    parse_mode: "Markdown"
+  });
 }
 
 function sendMenu(chatId) {
-  return sendMessage(chatId,
-    "🤖 *AgentOS — Choisissez votre agent :*\n\nQuel assistant souhaitez-vous consulter ?",
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🗓️ Agent Temps",  callback_data: "agent_temps"  }],
-          [{ text: "📣 Agent Social", callback_data: "agent_social" }],
-          [{ text: "📦 Agent Stock",  callback_data: "agent_stock"  }],
-        ],
-      },
+  return telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "🤖 *AgentOS* — Choisissez votre agent :",
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🗓️ Agent Temps", callback_data: "agent_temps" }],
+        [{ text: "📣 Agent Social", callback_data: "agent_social" }],
+        [{ text: "📦 Agent Stock", callback_data: "agent_stock" }]
+      ]
     }
-  );
+  });
 }
 
-function askClaude(systemPrompt, history, userMessage) {
+const AGENTS = {
+  temps: {
+    emoji: "🗓️",
+    name: "Agent Temps",
+    system: "Tu es un assistant en gestion du temps. Aide l'utilisateur à planifier ses journées, gérer son agenda et optimiser son emploi du temps. Réponds en français, sois concis."
+  },
+  social: {
+    emoji: "📣",
+    name: "Agent Social",
+    system: "Tu es un expert en réseaux sociaux. Tu rédiges des posts pour LinkedIn, Instagram, X et TikTok. Réponds en français, sois créatif et concis."
+  },
+  stock: {
+    emoji: "📦",
+    name: "Agent Stock",
+    system: "Tu es un gestionnaire de stocks. Tu surveilles les inventaires, alertes sur les ruptures et prépares des commandes. Réponds en français, sois précis et concis."
+  }
+};
+
+const userState = {};
+
+async function askClaude(system, history, message) {
+  const messages = [...history, { role: "user", content: message }];
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6",
+    max_tokens: 500,
+    system: system,
+    messages: messages
+  });
+
   return new Promise((resolve, reject) => {
-    const messages = [...history, { role: "user", content: userMessage }];
-    const body = JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages,
-    });
-    const req = https.request(
-      { hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY,
-                   "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) } },
-      (res) => {
-        let d = "";
-        res.on("data", c => d += c);
-        res.on("end", () => {
-          try {
-            const parsed = JSON.parse(d);
-            resolve(parsed.content?.[0]?.text || "Je n'ai pas pu générer de réponse.");
-          } catch { reject(new Error("Réponse invalide de Claude")); }
-        });
+    const options = {
+      hostname: "api.anthropic.com",
+      path: "/v1/messages",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Length": Buffer.byteLength(body)
       }
-    );
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          console.log("Réponse Claude reçue");
+          resolve(parsed.content?.[0]?.text || "Désolé, je n'ai pas pu répondre.");
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+
     req.on("error", reject);
     req.write(body);
     req.end();
@@ -92,76 +118,81 @@ function askClaude(systemPrompt, history, userMessage) {
 }
 
 async function handleUpdate(update) {
+  console.log("Update reçu:", JSON.stringify(update).substring(0, 100));
+
   if (update.callback_query) {
-    const { id, data, message } = update.callback_query;
-    const chatId = message.chat.id;
-    await apiCall("answerCallbackQuery", { callback_query_id: id });
+    const chatId = update.callback_query.message.chat.id;
+    const data = update.callback_query.data;
+    await telegramRequest("answerCallbackQuery", { callback_query_id: update.callback_query.id });
+
     const agentKey = data.replace("agent_", "");
     if (AGENTS[agentKey]) {
-      const state = getState(chatId);
-      state.agent = agentKey;
-      state.history = [];
+      userState[chatId] = { agent: agentKey, history: [] };
       const agent = AGENTS[agentKey];
-      await sendMessage(chatId,
-        `${agent.emoji} *${agent.name} activé !*\n\nBonjour ! Je suis votre ${agent.name}. Comment puis-je vous aider ?\n\n_Tapez /menu pour changer d'agent._`
-      );
+      await sendMessage(chatId, `${agent.emoji} *${agent.name} activé !*\n\nComment puis-je vous aider ?\n\n_/menu pour changer d'agent_`);
     }
     return;
   }
 
   if (!update.message?.text) return;
-  const { text, chat } = update.message;
-  const chatId = chat.id;
-  const state  = getState(chatId);
 
-  if (text === "/start") {
-    await sendMessage(chatId, "👋 *Bienvenue sur AgentOS !*\n\nJe suis votre suite d'agents IA pour gérer votre temps, vos réseaux sociaux et vos stocks.");
+  const chatId = update.message.chat.id;
+  const text = update.message.text;
+  console.log("Message de", chatId, ":", text);
+
+  if (text === "/start" || text === "/menu") {
     await sendMenu(chatId);
     return;
   }
-  if (text === "/menu")  { await sendMenu(chatId); return; }
-  if (text === "/reset") { state.history = []; await sendMessage(chatId, "🔄 Conversation réinitialisée."); return; }
-  if (text === "/aide" || text === "/help") {
-    await sendMessage(chatId,
-      "📖 *Commandes disponibles :*\n\n/start — Démarrer le bot\n/menu — Choisir un agent\n/reset — Réinitialiser la conversation\n/aide — Afficher cette aide"
-    );
+
+  if (text === "/reset") {
+    if (userState[chatId]) userState[chatId].history = [];
+    await sendMessage(chatId, "🔄 Conversation réinitialisée.");
     return;
   }
 
-  if (!state.agent) { await sendMenu(chatId); return; }
+  const state = userState[chatId];
+  if (!state?.agent) {
+    await sendMenu(chatId);
+    return;
+  }
 
-  await apiCall("sendChatAction", { chat_id: chatId, action: "typing" });
+  await telegramRequest("sendChatAction", { chat_id: chatId, action: "typing" });
+
   try {
-    const reply = await askClaude(AGENTS[state.agent].system, state.history, text);
+    const agent = AGENTS[state.agent];
+    const reply = await askClaude(agent.system, state.history, text);
     state.history.push({ role: "user", content: text });
     state.history.push({ role: "assistant", content: reply });
     if (state.history.length > 20) state.history = state.history.slice(-20);
     await sendMessage(chatId, reply);
   } catch (err) {
-    await sendMessage(chatId, "⚠️ Une erreur s'est produite. Réessayez dans un instant.");
-    console.error(err);
+    console.error("Erreur:", err);
+    await sendMessage(chatId, "⚠️ Une erreur s'est produite. Réessayez.");
   }
 }
 
 let offset = 0;
+
 async function poll() {
-  if (offset === 0) {
-    try {
-      const init = await apiCall("getUpdates", { offset: -1 });
-      if (init.result?.length) offset = init.result[init.result.length - 1].update_id + 1;
-    } catch(e) {}
-  }
   try {
-    const res = await apiCall("getUpdates", { offset, timeout: 30, allowed_updates: ["message", "callback_query"] });
-    if (res.result?.length) {
-      for (const update of res.result) {
+    const result = await telegramRequest("getUpdates", {
+      offset: offset,
+      timeout: 25,
+      allowed_updates: ["message", "callback_query"]
+    });
+
+    if (result.ok && result.result.length > 0) {
+      for (const update of result.result) {
         offset = update.update_id + 1;
-        handleUpdate(update).catch(console.error);
+        await handleUpdate(update);
       }
     }
-  } catch (e) { console.error("Polling error:", e.message); }
-  setTimeout(poll, 1000);
+  } catch (err) {
+    console.error("Erreur polling:", err.message);
+  }
+
+  setTimeout(poll, 500);
 }
 
-console.log("🤖 AgentOS Bot démarré...");
 poll();
