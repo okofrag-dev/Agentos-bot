@@ -2,6 +2,7 @@ const https = require("https");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const BUFFER_TOKEN = process.env.BUFFER_TOKEN;
 
 console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
 
@@ -64,7 +65,11 @@ const AGENTS = {
   social: {
     emoji: "📣",
     name: "Agent Social",
-    system: "Tu es un expert en réseaux sociaux. Tu rédiges des posts pour LinkedIn, Instagram, X et TikTok. Réponds en français, sois créatif et concis."
+    system: `Tu es un expert en réseaux sociaux. Tu rédiges des posts pour Instagram et LinkedIn. 
+Quand l'utilisateur veut publier sur Instagram, génère le texte du post et demande-lui l'URL de l'image.
+Une fois l'image fournie, réponds EXACTEMENT avec ce format JSON et rien d'autre:
+{"action":"publish_instagram","text":"le texte du post","image_url":"l'url de l'image"}
+Sinon réponds normalement en français.`
   },
   stock: {
     emoji: "📦",
@@ -74,6 +79,60 @@ const AGENTS = {
 };
 
 const userState = {};
+
+// ─── BUFFER API ───────────────────────────────────────────────────────────────
+function getBufferProfiles() {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: "api.bufferapp.com",
+      path: "/1/profiles.json?access_token=" + BUFFER_TOKEN,
+      method: "GET"
+    };
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function publishToBuffer(profileId, text, imageUrl) {
+  return new Promise((resolve, reject) => {
+    const postData = new URLSearchParams({
+      access_token: BUFFER_TOKEN,
+      profile_ids: profileId,
+      text: text,
+      media: JSON.stringify({ photo: imageUrl })
+    }).toString();
+
+    const options = {
+      hostname: "api.bufferapp.com",
+      path: "/1/updates/create.json",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
 
 async function askClaude(system, history, message) {
   const messages = [...history, { role: "user", content: message }];
@@ -103,11 +162,8 @@ async function askClaude(system, history, message) {
       res.on("end", () => {
         try {
           const parsed = JSON.parse(data);
-          console.log("Réponse Claude reçue");
           resolve(parsed.content?.[0]?.text || "Désolé, je n'ai pas pu répondre.");
-        } catch (e) {
-          reject(e);
-        }
+        } catch (e) { reject(e); }
       });
     });
 
@@ -127,7 +183,7 @@ async function handleUpdate(update) {
 
     const agentKey = data.replace("agent_", "");
     if (AGENTS[agentKey]) {
-      userState[chatId] = { agent: agentKey, history: [] };
+      userState[chatId] = { agent: agentKey, history: [], waitingForImage: false };
       const agent = AGENTS[agentKey];
       await sendMessage(chatId, `${agent.emoji} *${agent.name} activé !*\n\nComment puis-je vous aider ?\n\n_/menu pour changer d'agent_`);
     }
@@ -151,6 +207,17 @@ async function handleUpdate(update) {
     return;
   }
 
+  if (text === "/aide" || text === "/help") {
+    await sendMessage(chatId,
+      "📖 *Commandes disponibles :*\n\n" +
+      "/start — Démarrer le bot\n" +
+      "/menu — Choisir un agent\n" +
+      "/reset — Réinitialiser la conversation\n" +
+      "/aide — Afficher cette aide"
+    );
+    return;
+  }
+
   const state = userState[chatId];
   if (!state?.agent) {
     await sendMenu(chatId);
@@ -162,10 +229,40 @@ async function handleUpdate(update) {
   try {
     const agent = AGENTS[state.agent];
     const reply = await askClaude(agent.system, state.history, text);
+
+    // Vérifier si l'agent veut publier sur Instagram
+    try {
+      const parsed = JSON.parse(reply);
+      if (parsed.action === "publish_instagram") {
+        await sendMessage(chatId, "📤 Publication en cours sur Instagram...");
+        
+        // Récupérer le profil Instagram sur Buffer
+        const profiles = await getBufferProfiles();
+        const instagramProfile = profiles.find(p => p.service === "instagram");
+        
+        if (!instagramProfile) {
+          await sendMessage(chatId, "⚠️ Aucun compte Instagram trouvé sur Buffer. Vérifie ta connexion sur buffer.com");
+          return;
+        }
+
+        const result = await publishToBuffer(instagramProfile.id, parsed.text, parsed.image_url);
+        
+        if (result.success) {
+          await sendMessage(chatId, "✅ *Post publié sur Instagram !*\n\nIl apparaîtra dans ta file Buffer.");
+        } else {
+          await sendMessage(chatId, "⚠️ Erreur lors de la publication : " + (result.message || "Erreur inconnue"));
+        }
+        return;
+      }
+    } catch (e) {
+      // Pas un JSON, réponse normale
+    }
+
     state.history.push({ role: "user", content: text });
     state.history.push({ role: "assistant", content: reply });
     if (state.history.length > 20) state.history = state.history.slice(-20);
     await sendMessage(chatId, reply);
+
   } catch (err) {
     console.error("Erreur:", err);
     await sendMessage(chatId, "⚠️ Une erreur s'est produite. Réessayez.");
