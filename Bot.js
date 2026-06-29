@@ -83,7 +83,9 @@ function gmailRequest(path, accessToken, method = "GET", body = null) {
 
 async function getUnreadEmails() {
   const token = await getGmailAccessToken();
+  console.log("Access token récupéré:", token ? "OK" : "MANQUANT");
   const list = await gmailRequest("/gmail/v1/users/me/messages?q=is:unread&maxResults=5", token);
+  console.log("Réponse Gmail:", JSON.stringify(list).substring(0, 200));
   if (!list.messages || list.messages.length === 0) return "📭 Aucun email non lu.";
 
   let result = `📬 *${list.resultSizeEstimate || list.messages.length} emails non lus :*\n\n`;
