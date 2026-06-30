@@ -46,6 +46,9 @@ function sendMenu(chatId) {
 
 // ─── GMAIL ───────────────────────────────────────────────────────────────────
 async function getGmailAccessToken() {
+  console.log("Client ID présent:", GMAIL_CLIENT_ID ? "OUI" : "NON");
+  console.log("Client Secret présent:", GMAIL_CLIENT_SECRET ? "OUI" : "NON");
+  console.log("Refresh Token présent:", GMAIL_REFRESH_TOKEN ? "OUI" : "NON");
   return new Promise((resolve, reject) => {
     const data = new URLSearchParams({
       client_id: GMAIL_CLIENT_ID,
@@ -57,7 +60,14 @@ async function getGmailAccessToken() {
     const req = https.request(
       { hostname: "oauth2.googleapis.com", path: "/token", method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(data) } },
-      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => resolve(JSON.parse(d).access_token)); }
+      (res) => {
+        let d = "";
+        res.on("data", c => d += c);
+        res.on("end", () => {
+          console.log("Réponse OAuth Google:", d.substring(0, 300));
+          resolve(JSON.parse(d).access_token);
+        });
+      }
     );
     req.on("error", reject);
     req.write(data);
