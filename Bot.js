@@ -152,11 +152,11 @@ function publishToBuffer(profileId, text, imageUrl) {
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
 const AGENTS = {
   temps: {
-    emoji: "🗓️", name: "Agent Temps",
+    emoji: "🗓️", name: "Agent Planning",
     system: "Tu es un assistant en gestion du temps. Aide l'utilisateur à planifier ses journées, gérer son agenda et optimiser son emploi du temps. Réponds en français, sois concis."
   },
   social: {
-    emoji: "📣", name: "Agent Social",
+    emoji: "📣", name: "Nina insta",
     system: `Tu es un expert en réseaux sociaux. Tu rédiges des posts pour Instagram et LinkedIn.
 Quand l'utilisateur veut publier sur Instagram, génère le texte et demande l'URL de l'image.
 Une fois l'image fournie, réponds EXACTEMENT avec ce JSON:
@@ -164,11 +164,11 @@ Une fois l'image fournie, réponds EXACTEMENT avec ce JSON:
 Sinon réponds normalement en français.`
   },
   stock: {
-    emoji: "📦", name: "Agent Stock",
+    emoji: "📦", name: "Stock mania",
     system: "Tu es un gestionnaire de stocks. Tu surveilles les inventaires, alertes sur les ruptures et prépares des commandes. Réponds en français, sois précis et concis."
   },
   email: {
-    emoji: "📧", name: "Agent Email",
+    emoji: "📧", name: "Sophie",
     system: `Tu es un assistant de gestion d'emails Gmail.
 RÈGLE ABSOLUE : quand l'utilisateur veut lire ses emails, tu réponds UNIQUEMENT avec exactement ce texte, sans aucune explication :
 {"action":"read_emails"}
