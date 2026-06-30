@@ -140,6 +140,41 @@ async function getRecentHours() {
   return out;
 }
 
+async function getMonthlyReport(month, year) {
+  const token = await getGoogleAccessToken();
+  if (!token) return "⚠️ Erreur d'authentification Google.";
+
+  const result = await sheetsRequest(`/v4/spreadsheets/${SHEET_ID}/values/A:D`, token);
+  if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée pour le moment.";
+
+  const totals = {};
+  for (const row of result.values) {
+    if (row[0] === "Date" || !row[0] || !row[1] || !row[2]) continue;
+    const parts = row[0].split("/");
+    if (parts.length < 3) continue;
+    const rowMonth = parseInt(parts[1]);
+    const rowYear = parseInt(parts[2]);
+    if (rowMonth === month && rowYear === year) {
+      const employee = row[1].trim();
+      const hours = parseFloat(row[2]) || 0;
+      totals[employee] = (totals[employee] || 0) + hours;
+    }
+  }
+
+  if (Object.keys(totals).length === 0) {
+    return `📋 Aucune heure enregistrée pour ${month.toString().padStart(2,"0")}/${year}.`;
+  }
+
+  const monthNames = ["","Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
+  let out = `📊 *Bilan ${monthNames[month]} ${year} :*\n\n`;
+  let total = 0;
+  for (const [employee, hours] of Object.entries(totals).sort()) {
+    out += `👤 ${employee} — *${hours}h*\n`;
+    total += hours;
+  }
+  out += `\n⏱️ *Total équipe : ${total}h*`;
+  return out;
+}
 // ─── BUFFER ──────────────────────────────────────────────────────────────────
 function getBufferProfiles() {
   return new Promise((resolve, reject) => {
