@@ -1,14 +1,16 @@
 const https = require("https");
+const crypto = require("crypto");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const BUFFER_TOKEN = process.env.BUFFER_TOKEN;
-const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
-const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
-const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
+const GOOGLE_SERVICE_EMAIL = process.env.GOOGLE_SERVICE_EMAIL;
+const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
 console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
+console.log("Service email:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT");
+console.log("Private key:", GOOGLE_PRIVATE_KEY ? "OK" : "MANQUANT");
 
 // ─── TELEGRAM ────────────────────────────────────────────────────────────────
 function telegramRequest(method, body) {
@@ -36,83 +38,61 @@ function sendMenu(chatId) {
     parse_mode: "Markdown",
     reply_markup: {
       inline_keyboard: [
-        [{ text: "🗓️ Agent Temps",   callback_data: "agent_temps"   }],
-        [{ text: "📣 Agent Social",  callback_data: "agent_social"  }],
-        [{ text: "📦 Agent Stock",   callback_data: "agent_stock"   }],
-        [{ text: "📧 Agent Email",   callback_data: "agent_email"   }],
-        [{ text: "🕐 Agent RH",      callback_data: "agent_rh"      }],
+        [{ text: "🗓️ Agent Temps",  callback_data: "agent_temps"  }],
+        [{ text: "📣 Agent Social", callback_data: "agent_social" }],
+        [{ text: "📦 Agent Stock",  callback_data: "agent_stock"  }],
+        [{ text: "📧 Agent Email",  callback_data: "agent_email"  }],
+        [{ text: "🕐 Agent RH",    callback_data: "agent_rh"     }],
       ]
     }
   });
 }
 
-// ─── GOOGLE OAUTH (commun Gmail + Sheets) ─────────────────────────────────────
+// ─── GOOGLE SERVICE ACCOUNT JWT ───────────────────────────────────────────────
 async function getGoogleAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
+  const claim = {
+    iss: GOOGLE_SERVICE_EMAIL,
+    scope: "https://www.googleapis.com/auth/spreadsheets",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now
+  };
+
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify(claim)).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+
+  const sign = crypto.createSign("RSA-SHA256");
+  sign.update(signingInput);
+  const signature = sign.sign(GOOGLE_PRIVATE_KEY, "base64url");
+  const jwt = `${signingInput}.${signature}`;
+
   return new Promise((resolve, reject) => {
-    const data = new URLSearchParams({
-      client_id: GMAIL_CLIENT_ID,
-      client_secret: GMAIL_CLIENT_SECRET,
-      refresh_token: GMAIL_REFRESH_TOKEN,
-      grant_type: "refresh_token"
+    const body = new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt
     }).toString();
 
     const req = https.request(
       { hostname: "oauth2.googleapis.com", path: "/token", method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(data) } },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(body) } },
       (res) => {
         let d = "";
         res.on("data", c => d += c);
         res.on("end", () => {
-          try { resolve(JSON.parse(d).access_token); }
-          catch(e) { resolve(null); }
+          try {
+            const parsed = JSON.parse(d);
+            console.log("OAuth response:", parsed.access_token ? "Token OK" : JSON.stringify(parsed).substring(0, 150));
+            resolve(parsed.access_token || null);
+          } catch(e) { resolve(null); }
         });
       }
     );
     req.on("error", reject);
-    req.write(data);
+    req.write(body);
     req.end();
   });
-}
-
-// ─── GMAIL ───────────────────────────────────────────────────────────────────
-function gmailRequest(path, accessToken, method = "GET", body = null) {
-  return new Promise((resolve, reject) => {
-    const data = body ? JSON.stringify(body) : null;
-    const headers = { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" };
-    if (data) headers["Content-Length"] = Buffer.byteLength(data);
-
-    const req = https.request(
-      { hostname: "gmail.googleapis.com", path, method, headers },
-      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(d); } }); }
-    );
-    req.on("error", reject);
-    if (data) req.write(data);
-    req.end();
-  });
-}
-
-async function getUnreadEmails() {
-  const token = await getGoogleAccessToken();
-  const list = await gmailRequest("/gmail/v1/users/me/messages?q=is:unread&maxResults=5", token);
-  if (!list.messages || list.messages.length === 0) return "📭 Aucun email non lu.";
-
-  let result = `📬 *${list.resultSizeEstimate || list.messages.length} emails non lus :*\n\n`;
-  for (const msg of list.messages.slice(0, 5)) {
-    const detail = await gmailRequest(`/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token);
-    const headers = detail.payload?.headers || [];
-    const from = headers.find(h => h.name === "From")?.value || "Inconnu";
-    const subject = headers.find(h => h.name === "Subject")?.value || "Sans objet";
-    result += `📩 *De :* ${from.substring(0, 40)}\n📋 *Objet :* ${subject.substring(0, 50)}\n\n`;
-  }
-  return result;
-}
-
-async function sendEmail(to, subject, body) {
-  const token = await getGoogleAccessToken();
-  const email = [`To: ${to}`, `Subject: ${subject}`, `Content-Type: text/plain; charset=utf-8`, ``, body].join("\n");
-  const encoded = Buffer.from(email).toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
-  const result = await gmailRequest("/gmail/v1/users/me/messages/send", token, "POST", { raw: encoded });
-  return result.id ? "✅ Email envoyé avec succès !" : "⚠️ Erreur lors de l'envoi.";
 }
 
 // ─── GOOGLE SHEETS ───────────────────────────────────────────────────────────
@@ -136,16 +116,12 @@ async function addHoursToSheet(date, employee, hours, comment) {
   const token = await getGoogleAccessToken();
   if (!token) return "⚠️ Erreur d'authentification Google.";
 
-  const body = {
-    values: [[date, employee, hours, comment || ""]]
-  };
-
+  const body = { values: [[date, employee, hours, comment || ""]] };
   const result = await sheetsRequest(
     `/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     token, "POST", body
   );
-
-  return result.updates ? "✅ Heures enregistrées dans le tableau !" : "⚠️ Erreur lors de l'enregistrement : " + JSON.stringify(result).substring(0, 150);
+  return result.updates ? "✅ Heures enregistrées dans le tableau !" : "⚠️ Erreur : " + JSON.stringify(result).substring(0, 150);
 }
 
 async function getRecentHours() {
@@ -155,7 +131,7 @@ async function getRecentHours() {
   const result = await sheetsRequest(`/v4/spreadsheets/${SHEET_ID}/values/A:D`, token);
   if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée pour le moment.";
 
-  const rows = result.values.slice(-6); // 5 dernières lignes + en-tête potentiel
+  const rows = result.values.slice(-6);
   let out = "🕐 *Dernières heures enregistrées :*\n\n";
   for (const row of rows) {
     if (row[0] === "Date") continue;
@@ -196,7 +172,7 @@ function publishToBuffer(profileId, text, imageUrl) {
   });
 }
 
-// ─── CLAUDE / AGENTS ──────────────────────────────────────────────────────────
+// ─── AGENTS ──────────────────────────────────────────────────────────────────
 const AGENTS = {
   temps: {
     emoji: "🗓️", name: "Agent Temps",
@@ -217,36 +193,32 @@ Sinon réponds normalement en français.`
   email: {
     emoji: "📧", name: "Agent Email",
     system: `Tu es un assistant de gestion d'emails Gmail.
-RÈGLE ABSOLUE : quand l'utilisateur veut lire ses emails, tu réponds UNIQUEMENT avec exactement ce texte, sans aucune explication :
+RÈGLE ABSOLUE : quand l'utilisateur veut lire ses emails, réponds UNIQUEMENT avec :
 {"action":"read_emails"}
-RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos, tu réponds UNIQUEMENT avec exactement ce texte :
+RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos, réponds UNIQUEMENT avec :
 {"action":"send_email","to":"email","subject":"objet","body":"contenu"}
-Si tu n'as pas toutes les infos pour envoyer, demande-les en français.
-Pour toute autre demande, réponds normalement en français.
-NE JAMAIS expliquer le fonctionnement technique. NE JAMAIS dire que tu ne peux pas exécuter des actions.`
+Si infos manquantes, demande-les en français.
+NE JAMAIS expliquer le fonctionnement technique.`
   },
   rh: {
     emoji: "🕐", name: "Agent RH",
-    system: `Tu es un assistant de gestion des heures de travail des employés. Les employés t'envoient des messages en langage naturel pour déclarer leurs heures (ex: "j'ai fait 8h aujourd'hui", "lundi j'ai travaillé de 9h à 17h", "hier 6h de travail").
-
-RÈGLE ABSOLUE : dès que tu identifies une déclaration d'heures avec une date claire (ou "aujourd'hui"/"hier"/un jour de la semaine) et un nombre d'heures, réponds UNIQUEMENT avec exactement ce JSON, sans aucune explication :
-{"action":"log_hours","date":"JJ/MM/AAAA","employee":"NOM_FOURNI_PAR_USER_OU_INCONNU","hours":"X","comment":"contexte optionnel"}
-
-- Si "aujourd'hui" est mentionné, utilise la date du jour fournie dans le contexte.
-- Si l'employé ne donne pas son nom et qu'il ne te l'a pas donné avant dans la conversation, demande-le-lui d'abord en français avant de logger.
-- Si l'utilisateur demande à voir les heures récentes ou un résumé, réponds UNIQUEMENT avec :
+    system: `Tu es un assistant de gestion des heures de travail des employés.
+RÈGLE ABSOLUE : dès que tu identifies une déclaration d'heures avec une date et un nombre d'heures, réponds UNIQUEMENT avec ce JSON :
+{"action":"log_hours","date":"JJ/MM/AAAA","employee":"prénom","hours":"X","comment":""}
+Si l'employé ne donne pas son nom, demande-le d'abord.
+Si l'utilisateur veut voir les heures, réponds UNIQUEMENT avec :
 {"action":"get_hours"}
-
-Pour toute autre demande (questions générales, clarifications), réponds normalement en français, de façon concise.
-NE JAMAIS expliquer le fonctionnement technique. NE JAMAIS dire que tu ne peux pas exécuter des actions.`
+NE JAMAIS expliquer le fonctionnement technique.`
   }
 };
 
 async function askClaude(system, history, message) {
-  const today = new Date().toLocaleDateString('fr-FR');
-  const fullSystem = system + `\n\nDate du jour : ${today}`;
+  const today = new Date().toLocaleDateString("fr-FR");
   const messages = [...history, { role: "user", content: message }];
-  const body = JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 500, system: fullSystem, messages });
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6", max_tokens: 500,
+    system: system + `\n\nDate du jour : ${today}`, messages
+  });
 
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -314,7 +286,6 @@ async function handleUpdate(update) {
     try {
       const parsed = JSON.parse(reply);
 
-      // Publication Instagram
       if (parsed.action === "publish_instagram") {
         await sendMessage(chatId, "📤 Publication en cours sur Instagram...");
         const profiles = await getBufferProfiles();
@@ -325,23 +296,16 @@ async function handleUpdate(update) {
         return;
       }
 
-      // Lecture emails
       if (parsed.action === "read_emails") {
-        await sendMessage(chatId, "📬 Récupération de tes emails...");
-        const emails = await getUnreadEmails();
-        await sendMessage(chatId, emails);
+        await sendMessage(chatId, "📬 Fonctionnalité email en cours de configuration...");
         return;
       }
 
-      // Envoi email
       if (parsed.action === "send_email") {
-        await sendMessage(chatId, `📤 Envoi de l'email à ${parsed.to}...`);
-        const result = await sendEmail(parsed.to, parsed.subject, parsed.body);
-        await sendMessage(chatId, result);
+        await sendMessage(chatId, "📤 Fonctionnalité email en cours de configuration...");
         return;
       }
 
-      // Enregistrement heures RH
       if (parsed.action === "log_hours") {
         await sendMessage(chatId, "📝 Enregistrement des heures...");
         const result = await addHoursToSheet(parsed.date, parsed.employee, parsed.hours, parsed.comment);
@@ -349,7 +313,6 @@ async function handleUpdate(update) {
         return;
       }
 
-      // Consultation heures RH
       if (parsed.action === "get_hours") {
         await sendMessage(chatId, "🔎 Récupération des heures...");
         const result = await getRecentHours();
@@ -357,7 +320,7 @@ async function handleUpdate(update) {
         return;
       }
 
-    } catch(e) { /* Pas un JSON, réponse normale */ }
+    } catch(e) { /* Pas un JSON */ }
 
     state.history.push({ role: "user", content: text });
     state.history.push({ role: "assistant", content: reply });
