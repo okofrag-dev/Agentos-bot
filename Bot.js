@@ -5,12 +5,19 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const BUFFER_TOKEN = process.env.BUFFER_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
+
+// Gmail (OAuth utilisateur)
+const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
+const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
+const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
+
+// Sheets (compte de service)
 const GOOGLE_SERVICE_EMAIL = process.env.GOOGLE_SERVICE_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
 console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
-console.log("Service email:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT");
-console.log("Private key:", GOOGLE_PRIVATE_KEY ? "OK" : "MANQUANT");
+console.log("Gmail OAuth:", GMAIL_REFRESH_TOKEN ? "OK" : "MANQUANT");
+console.log("Sheets service:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT");
 
 // ─── TELEGRAM ────────────────────────────────────────────────────────────────
 function telegramRequest(method, body) {
@@ -48,21 +55,90 @@ function sendMenu(chatId) {
   });
 }
 
-// ─── GOOGLE SERVICE ACCOUNT JWT ───────────────────────────────────────────────
-async function getGoogleAccessToken() {
+// ─── GMAIL OAUTH (compte @gmail.com) ──────────────────────────────────────────
+async function getGmailAccessToken() {
+  return new Promise((resolve, reject) => {
+    const data = new URLSearchParams({
+      client_id: GMAIL_CLIENT_ID,
+      client_secret: GMAIL_CLIENT_SECRET,
+      refresh_token: GMAIL_REFRESH_TOKEN,
+      grant_type: "refresh_token"
+    }).toString();
+
+    const req = https.request(
+      { hostname: "oauth2.googleapis.com", path: "/token", method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(data) } },
+      (res) => {
+        let d = "";
+        res.on("data", c => d += c);
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(d);
+            console.log("Gmail OAuth:", parsed.access_token ? "Token OK" : JSON.stringify(parsed).substring(0, 150));
+            resolve(parsed.access_token || null);
+          } catch(e) { resolve(null); }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+function gmailRequest(path, accessToken, method = "GET", body = null) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const headers = { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" };
+    if (data) headers["Content-Length"] = Buffer.byteLength(data);
+    const req = https.request(
+      { hostname: "gmail.googleapis.com", path, method, headers },
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(d); } }); }
+    );
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function getUnreadEmails() {
+  const token = await getGmailAccessToken();
+  if (!token) return "⚠️ Erreur d'authentification Gmail.";
+  const list = await gmailRequest("/gmail/v1/users/me/messages?q=is:unread&maxResults=5", token);
+  if (!list.messages || list.messages.length === 0) return "📭 Aucun email non lu.";
+
+  let result = `📬 *${list.resultSizeEstimate || list.messages.length} emails non lus :*\n\n`;
+  for (const msg of list.messages.slice(0, 5)) {
+    const detail = await gmailRequest(`/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token);
+    const headers = detail.payload?.headers || [];
+    const from = headers.find(h => h.name === "From")?.value || "Inconnu";
+    const subject = headers.find(h => h.name === "Subject")?.value || "Sans objet";
+    result += `📩 *De :* ${from.substring(0, 40)}\n📋 ${subject.substring(0, 50)}\n\n`;
+  }
+  return result;
+}
+
+async function sendEmail(to, subject, body) {
+  const token = await getGmailAccessToken();
+  if (!token) return "⚠️ Erreur d'authentification Gmail.";
+  const email = [`To: ${to}`, `Subject: ${subject}`, `Content-Type: text/plain; charset=utf-8`, ``, body].join("\n");
+  const encoded = Buffer.from(email).toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+  const result = await gmailRequest("/gmail/v1/users/me/messages/send", token, "POST", { raw: encoded });
+  return result.id ? "✅ Email envoyé avec succès !" : "⚠️ Erreur lors de l'envoi.";
+}
+
+// ─── SHEETS (compte de service JWT) ───────────────────────────────────────────
+async function getSheetsAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   const claim = {
     iss: GOOGLE_SERVICE_EMAIL,
     scope: "https://www.googleapis.com/auth/spreadsheets",
     aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now
+    exp: now + 3600, iat: now
   };
-
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify(claim)).toString("base64url");
   const signingInput = `${header}.${payload}`;
-
   const sign = crypto.createSign("RSA-SHA256");
   sign.update(signingInput);
   const signature = sign.sign(GOOGLE_PRIVATE_KEY, "base64url");
@@ -73,21 +149,10 @@ async function getGoogleAccessToken() {
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion: jwt
     }).toString();
-
     const req = https.request(
       { hostname: "oauth2.googleapis.com", path: "/token", method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(body) } },
-      (res) => {
-        let d = "";
-        res.on("data", c => d += c);
-        res.on("end", () => {
-          try {
-            const parsed = JSON.parse(d);
-            console.log("OAuth response:", parsed.access_token ? "Token OK" : JSON.stringify(parsed).substring(0, 150));
-            resolve(parsed.access_token || null);
-          } catch(e) { resolve(null); }
-        });
-      }
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d).access_token || null); } catch(e) { resolve(null); } }); }
     );
     req.on("error", reject);
     req.write(body);
@@ -95,13 +160,11 @@ async function getGoogleAccessToken() {
   });
 }
 
-// ─── GOOGLE SHEETS ───────────────────────────────────────────────────────────
 function sheetsRequest(path, accessToken, method = "GET", body = null) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const headers = { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" };
     if (data) headers["Content-Length"] = Buffer.byteLength(data);
-
     const req = https.request(
       { hostname: "sheets.googleapis.com", path, method, headers },
       (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(d); } }); }
@@ -113,9 +176,8 @@ function sheetsRequest(path, accessToken, method = "GET", body = null) {
 }
 
 async function addHoursToSheet(date, employee, hours, comment) {
-  const token = await getGoogleAccessToken();
-  if (!token) return "⚠️ Erreur d'authentification Google.";
-
+  const token = await getSheetsAccessToken();
+  if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const body = { values: [[date, employee, hours, comment || ""]] };
   const result = await sheetsRequest(
     `/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
@@ -125,12 +187,10 @@ async function addHoursToSheet(date, employee, hours, comment) {
 }
 
 async function getRecentHours() {
-  const token = await getGoogleAccessToken();
-  if (!token) return "⚠️ Erreur d'authentification Google.";
-
+  const token = await getSheetsAccessToken();
+  if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const result = await sheetsRequest(`/v4/spreadsheets/${SHEET_ID}/values/A:D`, token);
-  if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée pour le moment.";
-
+  if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée.";
   const rows = result.values.slice(-6);
   let out = "🕐 *Dernières heures enregistrées :*\n\n";
   for (const row of rows) {
@@ -141,29 +201,22 @@ async function getRecentHours() {
 }
 
 async function getMonthlyReport(month, year) {
-  const token = await getGoogleAccessToken();
-  if (!token) return "⚠️ Erreur d'authentification Google.";
-
+  const token = await getSheetsAccessToken();
+  if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const result = await sheetsRequest(`/v4/spreadsheets/${SHEET_ID}/values/A:D`, token);
-  if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée pour le moment.";
+  if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée.";
 
   const totals = {};
   for (const row of result.values) {
     if (row[0] === "Date" || !row[0] || !row[1] || !row[2]) continue;
     const parts = row[0].split("/");
     if (parts.length < 3) continue;
-    const rowMonth = parseInt(parts[1]);
-    const rowYear = parseInt(parts[2]);
-    if (rowMonth === month && rowYear === year) {
+    if (parseInt(parts[1]) === month && parseInt(parts[2]) === year) {
       const employee = row[1].trim();
-      const hours = parseFloat(row[2]) || 0;
-      totals[employee] = (totals[employee] || 0) + hours;
+      totals[employee] = (totals[employee] || 0) + (parseFloat(row[2]) || 0);
     }
   }
-
-  if (Object.keys(totals).length === 0) {
-    return `📋 Aucune heure enregistrée pour ${month.toString().padStart(2,"0")}/${year}.`;
-  }
+  if (Object.keys(totals).length === 0) return `📋 Aucune heure pour ${String(month).padStart(2,"0")}/${year}.`;
 
   const monthNames = ["","Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
   let out = `📊 *Bilan ${monthNames[month]} ${year} :*\n\n`;
@@ -175,6 +228,7 @@ async function getMonthlyReport(month, year) {
   out += `\n⏱️ *Total équipe : ${total}h*`;
   return out;
 }
+
 // ─── BUFFER ──────────────────────────────────────────────────────────────────
 function getBufferProfiles() {
   return new Promise((resolve, reject) => {
@@ -190,12 +244,9 @@ function getBufferProfiles() {
 function publishToBuffer(profileId, text, imageUrl) {
   return new Promise((resolve, reject) => {
     const postData = new URLSearchParams({
-      access_token: BUFFER_TOKEN,
-      profile_ids: profileId,
-      text,
+      access_token: BUFFER_TOKEN, profile_ids: profileId, text,
       media: JSON.stringify({ photo: imageUrl })
     }).toString();
-
     const req = https.request(
       { hostname: "api.bufferapp.com", path: "/1/updates/create.json", method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) } },
@@ -230,10 +281,10 @@ Sinon réponds normalement en français.`
     system: `Tu es un assistant de gestion d'emails Gmail.
 RÈGLE ABSOLUE : quand l'utilisateur veut lire ses emails, réponds UNIQUEMENT avec :
 {"action":"read_emails"}
-RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos, réponds UNIQUEMENT avec :
+RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos (destinataire, objet, contenu), réponds UNIQUEMENT avec :
 {"action":"send_email","to":"email","subject":"objet","body":"contenu"}
 Si infos manquantes, demande-les en français.
-NE JAMAIS expliquer le fonctionnement technique.`
+NE JAMAIS expliquer le fonctionnement technique. NE JAMAIS dire que tu ne peux pas exécuter des actions.`
   },
   rh: {
     emoji: "🕐", name: "Agent RH",
@@ -241,8 +292,10 @@ NE JAMAIS expliquer le fonctionnement technique.`
 RÈGLE ABSOLUE : dès que tu identifies une déclaration d'heures avec une date et un nombre d'heures, réponds UNIQUEMENT avec ce JSON :
 {"action":"log_hours","date":"JJ/MM/AAAA","employee":"prénom","hours":"X","comment":""}
 Si l'employé ne donne pas son nom, demande-le d'abord.
-Si l'utilisateur veut voir les heures, réponds UNIQUEMENT avec :
+Si l'utilisateur veut voir les heures récentes, réponds UNIQUEMENT avec :
 {"action":"get_hours"}
+Si l'utilisateur veut le bilan/récapitulatif d'un mois, réponds UNIQUEMENT avec :
+{"action":"monthly_report","month":MM,"year":AAAA}
 NE JAMAIS expliquer le fonctionnement technique.`
   }
 };
@@ -254,7 +307,6 @@ async function askClaude(system, history, message) {
     model: "claude-sonnet-4-6", max_tokens: 500,
     system: system + `\n\nDate du jour : ${today}`, messages
   });
-
   return new Promise((resolve, reject) => {
     const req = https.request(
       { hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
@@ -263,10 +315,7 @@ async function askClaude(system, history, message) {
       (res) => {
         let d = "";
         res.on("data", c => d += c);
-        res.on("end", () => {
-          try { resolve(JSON.parse(d).content?.[0]?.text || "Désolé, je n'ai pas pu répondre."); }
-          catch(e) { reject(e); }
-        });
+        res.on("end", () => { try { resolve(JSON.parse(d).content?.[0]?.text || "Désolé, je n'ai pas pu répondre."); } catch(e) { reject(e); } });
       }
     );
     req.on("error", reject);
@@ -332,26 +381,32 @@ async function handleUpdate(update) {
       }
 
       if (parsed.action === "read_emails") {
-        await sendMessage(chatId, "📬 Fonctionnalité email en cours de configuration...");
+        await sendMessage(chatId, "📬 Récupération de tes emails...");
+        await sendMessage(chatId, await getUnreadEmails());
         return;
       }
 
       if (parsed.action === "send_email") {
-        await sendMessage(chatId, "📤 Fonctionnalité email en cours de configuration...");
+        await sendMessage(chatId, `📤 Envoi de l'email à ${parsed.to}...`);
+        await sendMessage(chatId, await sendEmail(parsed.to, parsed.subject, parsed.body));
         return;
       }
 
       if (parsed.action === "log_hours") {
         await sendMessage(chatId, "📝 Enregistrement des heures...");
-        const result = await addHoursToSheet(parsed.date, parsed.employee, parsed.hours, parsed.comment);
-        await sendMessage(chatId, result);
+        await sendMessage(chatId, await addHoursToSheet(parsed.date, parsed.employee, parsed.hours, parsed.comment));
         return;
       }
 
       if (parsed.action === "get_hours") {
         await sendMessage(chatId, "🔎 Récupération des heures...");
-        const result = await getRecentHours();
-        await sendMessage(chatId, result);
+        await sendMessage(chatId, await getRecentHours());
+        return;
+      }
+
+      if (parsed.action === "monthly_report") {
+        await sendMessage(chatId, "📊 Calcul du bilan mensuel...");
+        await sendMessage(chatId, await getMonthlyReport(parsed.month, parsed.year));
         return;
       }
 
