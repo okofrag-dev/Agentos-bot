@@ -460,8 +460,15 @@ async function handleUpdate(update) {
     const agent = AGENTS[state.agent];
     const reply = await askClaude(agent.system, state.history, text);
 
-    try {
-      const parsed = JSON.parse(reply);
+   try {
+      // Extraction robuste du JSON même s'il y a du texte autour
+      let jsonStr = reply.trim();
+      const firstBrace = jsonStr.indexOf("{");
+      const lastBrace = jsonStr.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+      }
+      const parsed = JSON.parse(jsonStr);
 
       // ─ AGENT TEMPS ─
       if (parsed.action === "create_event") {
