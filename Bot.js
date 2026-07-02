@@ -5,19 +5,23 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const BUFFER_TOKEN = process.env.BUFFER_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
+const CALENDAR_ID = process.env.CALENDAR_ID;
 
 // Gmail (OAuth utilisateur)
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
 const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
 const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 
-// Sheets (compte de service)
+// Sheets + Calendar (compte de service)
 const GOOGLE_SERVICE_EMAIL = process.env.GOOGLE_SERVICE_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
+// Ton chat ID pour les rappels
+const BOSS_CHAT_ID = "8291918824";
+
 console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
 console.log("Gmail OAuth:", GMAIL_REFRESH_TOKEN ? "OK" : "MANQUANT");
-console.log("Sheets service:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT");
+console.log("Sheets/Calendar service:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT");
 
 // ─── TELEGRAM ────────────────────────────────────────────────────────────────
 function telegramRequest(method, body) {
@@ -55,30 +59,17 @@ function sendMenu(chatId) {
   });
 }
 
-// ─── GMAIL OAUTH (compte @gmail.com) ──────────────────────────────────────────
+// ─── GMAIL OAUTH ──────────────────────────────────────────────────────────────
 async function getGmailAccessToken() {
   return new Promise((resolve, reject) => {
     const data = new URLSearchParams({
-      client_id: GMAIL_CLIENT_ID,
-      client_secret: GMAIL_CLIENT_SECRET,
-      refresh_token: GMAIL_REFRESH_TOKEN,
-      grant_type: "refresh_token"
+      client_id: GMAIL_CLIENT_ID, client_secret: GMAIL_CLIENT_SECRET,
+      refresh_token: GMAIL_REFRESH_TOKEN, grant_type: "refresh_token"
     }).toString();
-
     const req = https.request(
       { hostname: "oauth2.googleapis.com", path: "/token", method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(data) } },
-      (res) => {
-        let d = "";
-        res.on("data", c => d += c);
-        res.on("end", () => {
-          try {
-            const parsed = JSON.parse(d);
-            console.log("Gmail OAuth:", parsed.access_token ? "Token OK" : JSON.stringify(parsed).substring(0, 150));
-            resolve(parsed.access_token || null);
-          } catch(e) { resolve(null); }
-        });
-      }
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d).access_token || null); } catch(e) { resolve(null); } }); }
     );
     req.on("error", reject);
     req.write(data);
@@ -106,7 +97,6 @@ async function getUnreadEmails() {
   if (!token) return "⚠️ Erreur d'authentification Gmail.";
   const list = await gmailRequest("/gmail/v1/users/me/messages?q=is:unread&maxResults=5", token);
   if (!list.messages || list.messages.length === 0) return "📭 Aucun email non lu.";
-
   let result = `📬 *${list.resultSizeEstimate || list.messages.length} emails non lus :*\n\n`;
   for (const msg of list.messages.slice(0, 5)) {
     const detail = await gmailRequest(`/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token);
@@ -127,14 +117,12 @@ async function sendEmail(to, subject, body) {
   return result.id ? "✅ Email envoyé avec succès !" : "⚠️ Erreur lors de l'envoi.";
 }
 
-// ─── SHEETS (compte de service JWT) ───────────────────────────────────────────
-async function getSheetsAccessToken() {
+// ─── GOOGLE SERVICE ACCOUNT (Sheets + Calendar) ───────────────────────────────
+async function getServiceAccessToken(scope) {
   const now = Math.floor(Date.now() / 1000);
   const claim = {
-    iss: GOOGLE_SERVICE_EMAIL,
-    scope: "https://www.googleapis.com/auth/spreadsheets",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600, iat: now
+    iss: GOOGLE_SERVICE_EMAIL, scope,
+    aud: "https://oauth2.googleapis.com/token", exp: now + 3600, iat: now
   };
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify(claim)).toString("base64url");
@@ -146,8 +134,7 @@ async function getSheetsAccessToken() {
 
   return new Promise((resolve, reject) => {
     const body = new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt
     }).toString();
     const req = https.request(
       { hostname: "oauth2.googleapis.com", path: "/token", method: "POST",
@@ -160,6 +147,110 @@ async function getSheetsAccessToken() {
   });
 }
 
+// ─── GOOGLE CALENDAR ──────────────────────────────────────────────────────────
+function calendarRequest(path, accessToken, method = "GET", body = null) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const headers = { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" };
+    if (data) headers["Content-Length"] = Buffer.byteLength(data);
+    const req = https.request(
+      { hostname: "www.googleapis.com", path, method, headers },
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(d); } }); }
+    );
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function createEvent(title, startISO, endISO, description) {
+  const token = await getServiceAccessToken("https://www.googleapis.com/auth/calendar");
+  if (!token) return "⚠️ Erreur de connexion à l'agenda.";
+  const event = {
+    summary: title,
+    description: description || "",
+    start: { dateTime: startISO, timeZone: "Europe/Paris" },
+    end: { dateTime: endISO, timeZone: "Europe/Paris" }
+  };
+  const result = await calendarRequest(
+    `/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events`,
+    token, "POST", event
+  );
+  if (result.id) {
+    const d = new Date(startISO);
+    const dateStr = d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+    const timeStr = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    return `✅ *Événement créé !*\n\n📅 ${title}\n🕐 ${dateStr} à ${timeStr}`;
+  }
+  return "⚠️ Erreur lors de la création : " + JSON.stringify(result).substring(0, 150);
+}
+
+async function listEvents(daysAhead) {
+  const token = await getServiceAccessToken("https://www.googleapis.com/auth/calendar");
+  if (!token) return "⚠️ Erreur de connexion à l'agenda.";
+  const now = new Date();
+  const future = new Date(now.getTime() + (daysAhead || 7) * 24 * 60 * 60 * 1000);
+  const path = `/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events?timeMin=${now.toISOString()}&timeMax=${future.toISOString()}&singleEvents=true&orderBy=startTime`;
+  const result = await calendarRequest(path, token);
+  if (!result.items || result.items.length === 0) return "📅 Aucun événement prévu sur cette période.";
+
+  let out = `📅 *Tes prochains rendez-vous :*\n\n`;
+  for (const ev of result.items) {
+    const start = ev.start.dateTime || ev.start.date;
+    const d = new Date(start);
+    const dateStr = d.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
+    const timeStr = ev.start.dateTime ? d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "journée";
+    out += `• *${dateStr}* ${timeStr} — ${ev.summary}\n`;
+  }
+  return out;
+}
+
+// ─── RAPPELS (stockés en mémoire) ─────────────────────────────────────────────
+// Chaque rappel : { chatId, text, triggerTime (timestamp ms), sent }
+let reminders = [];
+
+function addReminder(chatId, text, triggerTime) {
+  reminders.push({ chatId, text, triggerTime, sent: false });
+}
+
+function checkReminders() {
+  const now = Date.now();
+  for (const r of reminders) {
+    if (!r.sent && r.triggerTime <= now) {
+      sendMessage(r.chatId, `⏰ *Rappel :* ${r.text}`);
+      r.sent = true;
+    }
+  }
+  // Nettoyage des rappels envoyés
+  reminders = reminders.filter(r => !r.sent);
+}
+setInterval(checkReminders, 30 * 1000); // vérifie toutes les 30s
+
+// ─── TÂCHES RÉCURRENTES (stockées en mémoire) ─────────────────────────────────
+// Chaque tâche : { chatId, text, dayOfWeek (0-6), hour, minute, lastFired (dateStr) }
+let recurringTasks = [];
+
+function addRecurringTask(chatId, text, dayOfWeek, hour, minute) {
+  recurringTasks.push({ chatId, text, dayOfWeek, hour, minute, lastFired: null });
+}
+
+function checkRecurringTasks() {
+  const parisNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
+  const day = parisNow.getDay();
+  const h = parisNow.getHours();
+  const m = parisNow.getMinutes();
+  const todayStr = parisNow.toDateString();
+
+  for (const t of recurringTasks) {
+    if (t.dayOfWeek === day && t.hour === h && t.minute === m && t.lastFired !== todayStr) {
+      sendMessage(t.chatId, `🔁 *Tâche récurrente :* ${t.text}`);
+      t.lastFired = todayStr;
+    }
+  }
+}
+setInterval(checkRecurringTasks, 60 * 1000); // vérifie chaque minute
+
+// ─── SHEETS (RH) ──────────────────────────────────────────────────────────────
 function sheetsRequest(path, accessToken, method = "GET", body = null) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
@@ -176,36 +267,21 @@ function sheetsRequest(path, accessToken, method = "GET", body = null) {
 }
 
 async function addHoursToSheet(date, employee, hours, comment) {
-  const token = await getSheetsAccessToken();
+  const token = await getServiceAccessToken("https://www.googleapis.com/auth/spreadsheets");
   if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const body = { values: [[date, employee, hours, comment || ""]] };
   const result = await sheetsRequest(
     `/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     token, "POST", body
   );
-  return result.updates ? "✅ Heures enregistrées dans le tableau !" : "⚠️ Erreur : " + JSON.stringify(result).substring(0, 150);
-}
-
-async function getRecentHours() {
-  const token = await getSheetsAccessToken();
-  if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
-  const result = await sheetsRequest(`/v4/spreadsheets/${SHEET_ID}/values/A:D`, token);
-  if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée.";
-  const rows = result.values.slice(-6);
-  let out = "🕐 *Dernières heures enregistrées :*\n\n";
-  for (const row of rows) {
-    if (row[0] === "Date") continue;
-    out += `📅 ${row[0]} — ${row[1]} : *${row[2]}h*${row[3] ? " (" + row[3] + ")" : ""}\n`;
-  }
-  return out;
+  return result.updates ? "✅ Heures enregistrées !" : "⚠️ Erreur : " + JSON.stringify(result).substring(0, 150);
 }
 
 async function getMonthlyReport(month, year) {
-  const token = await getSheetsAccessToken();
+  const token = await getServiceAccessToken("https://www.googleapis.com/auth/spreadsheets");
   if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const result = await sheetsRequest(`/v4/spreadsheets/${SHEET_ID}/values/A:D`, token);
   if (!result.values || result.values.length <= 1) return "📋 Aucune heure enregistrée.";
-
   const totals = {};
   for (const row of result.values) {
     if (row[0] === "Date" || !row[0] || !row[1] || !row[2]) continue;
@@ -217,7 +293,6 @@ async function getMonthlyReport(month, year) {
     }
   }
   if (Object.keys(totals).length === 0) return `📋 Aucune heure pour ${String(month).padStart(2,"0")}/${year}.`;
-
   const monthNames = ["","Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
   let out = `📊 *Bilan ${monthNames[month]} ${year} :*\n\n`;
   let total = 0;
@@ -262,7 +337,25 @@ function publishToBuffer(profileId, text, imageUrl) {
 const AGENTS = {
   temps: {
     emoji: "🗓️", name: "Agent Temps",
-    system: "Tu es un assistant en gestion du temps. Aide l'utilisateur à planifier ses journées, gérer son agenda et optimiser son emploi du temps. Réponds en français, sois concis."
+    system: `Tu es l'assistant de gestion du temps d'un restaurateur. Tu gères son agenda Google, ses rappels et ses tâches récurrentes.
+
+RÈGLE ABSOLUE — CRÉER UN ÉVÉNEMENT : quand l'utilisateur veut ajouter un rendez-vous/événement, réponds UNIQUEMENT avec ce JSON :
+{"action":"create_event","title":"titre","start":"AAAA-MM-JJTHH:MM:SS","end":"AAAA-MM-JJTHH:MM:SS","description":""}
+(calcule start et end à partir de la date du jour fournie ; si pas de durée précisée, mets 1h par défaut)
+
+RÈGLE ABSOLUE — VOIR L'AGENDA : quand l'utilisateur veut consulter ses rendez-vous, réponds UNIQUEMENT avec :
+{"action":"list_events","days":7}
+(ajuste "days" selon la demande : "aujourd'hui"=1, "cette semaine"=7, "ce mois"=31)
+
+RÈGLE ABSOLUE — RAPPEL PONCTUEL : quand l'utilisateur veut être rappelé d'une chose à un moment précis, réponds UNIQUEMENT avec :
+{"action":"add_reminder","text":"le rappel","datetime":"AAAA-MM-JJTHH:MM:SS"}
+
+RÈGLE ABSOLUE — TÂCHE RÉCURRENTE : quand l'utilisateur veut un rappel qui se répète chaque semaine, réponds UNIQUEMENT avec :
+{"action":"add_recurring","text":"la tâche","day":"lundi","hour":9,"minute":0}
+(day = jour de la semaine en français)
+
+Pour toute autre demande (conseils d'organisation, questions), réponds normalement en français, de façon concise.
+NE JAMAIS expliquer le fonctionnement technique.`
   },
   social: {
     emoji: "📣", name: "Agent Social",
@@ -281,31 +374,28 @@ Sinon réponds normalement en français.`
     system: `Tu es un assistant de gestion d'emails Gmail.
 RÈGLE ABSOLUE : quand l'utilisateur veut lire ses emails, réponds UNIQUEMENT avec :
 {"action":"read_emails"}
-RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos (destinataire, objet, contenu), réponds UNIQUEMENT avec :
+RÈGLE ABSOLUE : quand l'utilisateur veut envoyer un email et que tu as toutes les infos, réponds UNIQUEMENT avec :
 {"action":"send_email","to":"email","subject":"objet","body":"contenu"}
 Si infos manquantes, demande-les en français.
-NE JAMAIS expliquer le fonctionnement technique. NE JAMAIS dire que tu ne peux pas exécuter des actions.`
+NE JAMAIS expliquer le fonctionnement technique.`
   },
   rh: {
     emoji: "🕐", name: "Agent RH",
     system: `Tu es un assistant de gestion des heures de travail des employés.
 RÈGLE ABSOLUE : dès que tu identifies une déclaration d'heures avec une date et un nombre d'heures, réponds UNIQUEMENT avec ce JSON :
 {"action":"log_hours","date":"JJ/MM/AAAA","employee":"prénom","hours":"X","comment":""}
-Si l'employé ne donne pas son nom, demande-le d'abord.
-Si l'utilisateur veut voir les heures récentes, réponds UNIQUEMENT avec :
-{"action":"get_hours"}
-Si l'utilisateur veut le bilan/récapitulatif d'un mois, réponds UNIQUEMENT avec :
+Si l'utilisateur veut le bilan d'un mois, réponds UNIQUEMENT avec :
 {"action":"monthly_report","month":MM,"year":AAAA}
 NE JAMAIS expliquer le fonctionnement technique.`
   }
 };
 
 async function askClaude(system, history, message) {
-  const today = new Date().toLocaleDateString("fr-FR");
+  const today = new Date().toLocaleString("fr-FR", { timeZone: "Europe/Paris", weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const messages = [...history, { role: "user", content: message }];
   const body = JSON.stringify({
     model: "claude-sonnet-4-6", max_tokens: 500,
-    system: system + `\n\nDate du jour : ${today}`, messages
+    system: system + `\n\nDate et heure actuelles (Paris) : ${today}`, messages
   });
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -323,6 +413,9 @@ async function askClaude(system, history, message) {
     req.end();
   });
 }
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+const JOURS = { "dimanche":0, "lundi":1, "mardi":2, "mercredi":3, "jeudi":4, "vendredi":5, "samedi":6 };
 
 // ─── HANDLER ─────────────────────────────────────────────────────────────────
 const userState = {};
@@ -370,6 +463,34 @@ async function handleUpdate(update) {
     try {
       const parsed = JSON.parse(reply);
 
+      // ─ AGENT TEMPS ─
+      if (parsed.action === "create_event") {
+        await sendMessage(chatId, "📅 Création de l'événement...");
+        await sendMessage(chatId, await createEvent(parsed.title, parsed.start, parsed.end, parsed.description));
+        return;
+      }
+      if (parsed.action === "list_events") {
+        await sendMessage(chatId, "🔎 Consultation de l'agenda...");
+        await sendMessage(chatId, await listEvents(parsed.days));
+        return;
+      }
+      if (parsed.action === "add_reminder") {
+        const triggerTime = new Date(parsed.datetime).getTime();
+        addReminder(chatId, parsed.text, triggerTime);
+        const d = new Date(parsed.datetime);
+        const when = d.toLocaleString("fr-FR", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+        await sendMessage(chatId, `⏰ *Rappel programmé !*\n\n"${parsed.text}"\n📆 ${when}`);
+        return;
+      }
+      if (parsed.action === "add_recurring") {
+        const dayNum = JOURS[parsed.day.toLowerCase()];
+        if (dayNum === undefined) { await sendMessage(chatId, "⚠️ Jour non reconnu."); return; }
+        addRecurringTask(chatId, parsed.text, dayNum, parsed.hour, parsed.minute || 0);
+        await sendMessage(chatId, `🔁 *Tâche récurrente créée !*\n\n"${parsed.text}"\n📆 Chaque ${parsed.day} à ${String(parsed.hour).padStart(2,"0")}h${String(parsed.minute||0).padStart(2,"0")}`);
+        return;
+      }
+
+      // ─ AGENT SOCIAL ─
       if (parsed.action === "publish_instagram") {
         await sendMessage(chatId, "📤 Publication en cours sur Instagram...");
         const profiles = await getBufferProfiles();
@@ -380,30 +501,24 @@ async function handleUpdate(update) {
         return;
       }
 
+      // ─ AGENT EMAIL ─
       if (parsed.action === "read_emails") {
         await sendMessage(chatId, "📬 Récupération de tes emails...");
         await sendMessage(chatId, await getUnreadEmails());
         return;
       }
-
       if (parsed.action === "send_email") {
         await sendMessage(chatId, `📤 Envoi de l'email à ${parsed.to}...`);
         await sendMessage(chatId, await sendEmail(parsed.to, parsed.subject, parsed.body));
         return;
       }
 
+      // ─ AGENT RH ─
       if (parsed.action === "log_hours") {
         await sendMessage(chatId, "📝 Enregistrement des heures...");
         await sendMessage(chatId, await addHoursToSheet(parsed.date, parsed.employee, parsed.hours, parsed.comment));
         return;
       }
-
-      if (parsed.action === "get_hours") {
-        await sendMessage(chatId, "🔎 Récupération des heures...");
-        await sendMessage(chatId, await getRecentHours());
-        return;
-      }
-
       if (parsed.action === "monthly_report") {
         await sendMessage(chatId, "📊 Calcul du bilan mensuel...");
         await sendMessage(chatId, await getMonthlyReport(parsed.month, parsed.year));
