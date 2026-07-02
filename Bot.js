@@ -271,7 +271,7 @@ async function addHoursToSheet(date, employee, hours, comment) {
   if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const body = { values: [[date, employee, hours, comment || ""]] };
   const result = await sheetsRequest(
-    `/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+`/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
     token, "POST", body
   );
   return result.updates ? "✅ Heures enregistrées !" : "⚠️ Erreur : " + JSON.stringify(result).substring(0, 150);
