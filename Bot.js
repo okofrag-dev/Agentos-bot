@@ -231,7 +231,11 @@ setInterval(checkReminders, 30 * 1000); // vérifie toutes les 30s
 let recurringTasks = [];
 
 function addRecurringTask(chatId, text, dayOfWeek, hour, minute) {
-  recurringTasks.push({ chatId, text, dayOfWeek, hour, minute, lastFired: null });
+  recurringTasks.push({ type: "weekly", chatId, text, dayOfWeek, hour, minute, lastFired: null });
+}
+
+function addMonthlyTask(chatId, text, dayOfMonth, hour, minute) {
+  recurringTasks.push({ type: "monthly", chatId, text, dayOfMonth, hour, minute, lastFired: null });
 }
 
 function checkRecurringTasks() {
