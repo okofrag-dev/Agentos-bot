@@ -369,9 +369,13 @@ RÈGLE ABSOLUE — VOIR L'AGENDA : quand l'utilisateur veut consulter ses rendez
 RÈGLE ABSOLUE — RAPPEL PONCTUEL : quand l'utilisateur veut être rappelé d'une chose à un moment précis, réponds UNIQUEMENT avec :
 {"action":"add_reminder","text":"le rappel","datetime":"AAAA-MM-JJTHH:MM:SS"}
 
-RÈGLE ABSOLUE — TÂCHE RÉCURRENTE : quand l'utilisateur veut un rappel qui se répète chaque semaine, réponds UNIQUEMENT avec :
+RÈGLE ABSOLUE — TÂCHE RÉCURRENTE HEBDOMADAIRE : quand l'utilisateur veut un rappel qui se répète chaque semaine, réponds UNIQUEMENT avec :
 {"action":"add_recurring","text":"la tâche","day":"lundi","hour":9,"minute":0}
 (day = jour de la semaine en français)
+
+RÈGLE ABSOLUE — TÂCHE RÉCURRENTE MENSUELLE : quand l'utilisateur veut un rappel qui se répète chaque mois, réponds UNIQUEMENT avec :
+{"action":"add_monthly","text":"la tâche","dayOfMonth":"last","hour":23,"minute":0}
+(dayOfMonth = "last" pour le dernier jour du mois, ou un nombre de 1 à 31 pour un jour précis)
 
 Pour toute autre demande (conseils d'organisation, questions), réponds normalement en français, de façon concise.
 NE JAMAIS expliquer le fonctionnement technique.`
@@ -508,11 +512,17 @@ async function handleUpdate(update) {
         await sendMessage(chatId, `⏰ *Rappel programmé !*\n\n"${parsed.text}"\n📆 ${when}`);
         return;
       }
-      if (parsed.action === "add_recurring") {
+    if (parsed.action === "add_recurring") {
         const dayNum = JOURS[parsed.day.toLowerCase()];
         if (dayNum === undefined) { await sendMessage(chatId, "⚠️ Jour non reconnu."); return; }
         addRecurringTask(chatId, parsed.text, dayNum, parsed.hour, parsed.minute || 0);
         await sendMessage(chatId, `🔁 *Tâche récurrente créée !*\n\n"${parsed.text}"\n📆 Chaque ${parsed.day} à ${String(parsed.hour).padStart(2,"0")}h${String(parsed.minute||0).padStart(2,"0")}`);
+        return;
+      }
+      if (parsed.action === "add_monthly") {
+        addMonthlyTask(chatId, parsed.text, parsed.dayOfMonth, parsed.hour, parsed.minute || 0);
+        const quand = parsed.dayOfMonth === "last" ? "le dernier jour de chaque mois" : `le ${parsed.dayOfMonth} de chaque mois`;
+        await sendMessage(chatId, `📅 *Rappel mensuel créé !*\n\n"${parsed.text}"\n📆 ${quand} à ${String(parsed.hour).padStart(2,"0")}h${String(parsed.minute||0).padStart(2,"0")}`);
         return;
       }
 
