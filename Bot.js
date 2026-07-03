@@ -636,6 +636,16 @@ async function handleUpdate(update) {
         await sendMessage(chatId, `📅 *Rappel mensuel créé !*\n\n"${parsed.text}"\n📆 ${quand} à ${String(parsed.hour).padStart(2,"0")}h${String(parsed.minute||0).padStart(2,"0")}`);
         return;
       }
+      if (parsed.action === "generate_image") {
+        await sendMessage(chatId, "🎨 Génération de l'image en cours... (30-60s)");
+        const image = await generateImage(parsed.prompt);
+        if (image && image.b64) {
+          await sendPhoto(chatId, image.b64, "✨ Voici ton visuel ! Tu peux me demander de le refaire ou de l'ajuster.");
+        } else {
+          await sendMessage(chatId, "⚠️ Erreur lors de la génération. Vérifie tes crédits OpenAI ou réessaie.");
+        }
+        return;
+      }
       if (parsed.action === "publish_instagram") {
         await sendMessage(chatId, "📤 Publication en cours sur Instagram...");
         const profiles = await getBufferProfiles();
