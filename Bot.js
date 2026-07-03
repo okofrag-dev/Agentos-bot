@@ -25,7 +25,7 @@ console.log("Sheets/Calendar service:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT"
 
 // ─── TELEGRAM ────────────────────────────────────────────────────────────────
 function telegramRequest(method, body) {
-  return new Promise((resolve, reject) => {
+   new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = https.request(
       { hostname: "api.telegram.org", path: `/bot${TOKEN}/${method}`, method: "POST",
@@ -106,6 +106,63 @@ async function getUnreadEmails() {
     result += `📩 *De :* ${from.substring(0, 40)}\n📋 ${subject.substring(0, 50)}\n\n`;
   }
   return result;
+  async function getEmailsForSummary() {
+  const token = await getGmailAccessToken();
+  if (!token) return null;
+  // Emails reçus depuis 24h
+  const list = await gmailRequest("/gmail/v1/users/me/messages?q=newer_than:1d&maxResults=15", token);
+  if (!list.messages || list.messages.length === 0) return "empty";
+
+  const emails = [];
+  for (const msg of list.messages) {
+    const detail = await gmailRequest(`/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token);
+    const headers = detail.payload?.headers || [];
+    const from = headers.find(h => h.name === "From")?.value || "Inconnu";
+    const subject = headers.find(h => h.name === "Subject")?.value || "Sans objet";
+    const snippet = detail.snippet || "";
+    emails.push({ from, subject, snippet: snippet.substring(0, 100) });
+  }
+  return emails;
+}
+
+async function sendDailyEmailSummary() {
+  const emails = await getEmailsForSummary();
+  if (emails === null) { console.log("Résumé email: erreur auth"); return; }
+  if (emails === "empty") {
+    await sendMessage(BOSS_CHAT_ID, "📭 *Résumé du matin*\n\nAucun nouvel email dans les dernières 24h.");
+    return;
+  }
+
+  const emailList = emails.map((e, i) => `${i+1}. De: ${e.from}\n   Objet: ${e.subject}\n   Aperçu: ${e.snippet}`).join("\n\n");
+  const prompt = `Voici les emails reçus dans les dernières 24h par un restaurateur. Identifie UNIQUEMENT ceux qui sont importants (fournisseurs, clients, réservations, factures, urgences, administratif). Ignore les newsletters, pubs et spams.
+
+Fais un résumé court et clair en français, groupé par catégorie. Pour chaque email important, donne l'expéditeur et l'essentiel en une ligne. Si rien d'important, dis-le simplement.
+
+EMAILS:
+${emailList}`;
+
+  const summary = await askClaudeSimple(prompt);
+  await sendMessage(BOSS_CHAT_ID, `☀️ *Résumé de tes emails*\n\n${summary}`);
+  console.log("Résumé email envoyé");
+}
+
+// Appel Claude simple (sans historique, pour usage interne)
+async function askClaudeSimple(prompt) {
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6", max_tokens: 800,
+    messages: [{ role: "user", content: prompt }]
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY,
+                   "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) } },
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d).content?.[0]?.text || "Résumé indisponible."); } catch(e) { resolve("Résumé indisponible."); } }); }
+    );
+    req.on("error", () => resolve("Résumé indisponible."));
+    req.write(body);
+    req.end();
+  });
 }
 
 async function sendEmail(to, subject, body) {
