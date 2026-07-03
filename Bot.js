@@ -630,7 +630,21 @@ async function handleUpdate(update) {
     await sendMessage(chatId, "⚠️ Une erreur s'est produite. Réessayez.");
   }
 }
+// ─── RÉSUMÉ EMAILS QUOTIDIEN À 10H (heure de Paris) ───────────────────────────
+let lastEmailSummaryDate = null;
+function checkDailyEmailSummary() {
+  const parisNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
+  const h = parisNow.getHours();
+  const m = parisNow.getMinutes();
+  const todayStr = parisNow.toDateString();
 
+  // Déclenche une seule fois entre 10h00 et 10h04
+  if (h === 10 && m < 5 && lastEmailSummaryDate !== todayStr) {
+    lastEmailSummaryDate = todayStr;
+    sendDailyEmailSummary().catch(e => console.error("Erreur résumé email:", e));
+  }
+}
+setInterval(checkDailyEmailSummary, 60 * 1000); // vérifie chaque minute
 // ─── POLLING ─────────────────────────────────────────────────────────────────
 let offset = 0;
 async function poll() {
