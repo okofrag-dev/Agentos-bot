@@ -240,10 +240,25 @@ function checkRecurringTasks() {
   const h = parisNow.getHours();
   const m = parisNow.getMinutes();
   const todayStr = parisNow.toDateString();
+  const dayOfMonth = parisNow.getDate();
+  // Dernier jour du mois : on regarde si demain c'est le 1er
+  const tomorrow = new Date(parisNow);
+  tomorrow.setDate(dayOfMonth + 1);
+  const isLastDayOfMonth = tomorrow.getDate() === 1;
 
   for (const t of recurringTasks) {
-    if (t.dayOfWeek === day && t.hour === h && t.minute === m && t.lastFired !== todayStr) {
-      sendMessage(t.chatId, `🔁 *Tâche récurrente :* ${t.text}`);
+    if (t.hour !== h || t.minute !== m || t.lastFired === todayStr) continue;
+
+    let shouldFire = false;
+    if (t.type === "weekly" && t.dayOfWeek === day) shouldFire = true;
+    if (t.type === "monthly") {
+      if (t.dayOfMonth === "last" && isLastDayOfMonth) shouldFire = true;
+      else if (typeof t.dayOfMonth === "number" && t.dayOfMonth === dayOfMonth) shouldFire = true;
+    }
+
+    if (shouldFire) {
+      const prefix = t.type === "monthly" ? "📅 *Rappel mensuel :*" : "🔁 *Tâche récurrente :*";
+      sendMessage(t.chatId, `${prefix} ${t.text}`);
       t.lastFired = todayStr;
     }
   }
