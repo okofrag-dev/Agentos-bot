@@ -13,7 +13,7 @@ const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 
 const GOOGLE_SERVICE_EMAIL = process.env.GOOGLE_SERVICE_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BOSS_CHAT_ID = "8291918824";
 
 console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
@@ -348,7 +348,68 @@ function publishToBuffer(profileId, text, imageUrl) {
     req.end();
   });
 }
+// ─── GÉNÉRATION D'IMAGE (OpenAI) ──────────────────────────────────────────────
+async function generateImage(prompt) {
+  const body = JSON.stringify({
+    model: "gpt-image-1",
+    prompt: prompt,
+    size: "1024x1536",
+    quality: "medium",
+    n: 1
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: "api.openai.com", path: "/v1/images/generations", method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                   "Content-Length": Buffer.byteLength(body) } },
+      (res) => {
+        let d = "";
+        res.on("data", c => d += c);
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(d);
+            if (parsed.data && parsed.data[0]) {
+              // gpt-image-1 renvoie du base64
+              resolve({ b64: parsed.data[0].b64_json, url: parsed.data[0].url });
+            } else {
+              console.log("Erreur image:", JSON.stringify(parsed).substring(0, 200));
+              resolve(null);
+            }
+          } catch(e) { resolve(null); }
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.write(body);
+    req.end();
+  });
+}
 
+async function sendPhoto(chatId, b64Data, caption) {
+  // Envoie une photo depuis du base64 via Telegram
+  const buffer = Buffer.from(b64Data, "base64");
+  const boundary = "----AgentOS" + Date.now();
+  const parts = [];
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`));
+  if (caption) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`));
+  }
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="image.png"\r\nContent-Type: image/png\r\n\r\n`));
+  parts.push(buffer);
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+  const payload = Buffer.concat(parts);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: "api.telegram.org", path: `/bot${TOKEN}/sendPhoto`, method: "POST",
+        headers: { "Content-Type": `multipart/form-data; boundary=${boundary}`, "Content-Length": payload.length } },
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => resolve(JSON.parse(d))); }
+    );
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
 const AGENTS = {
   temps: {
