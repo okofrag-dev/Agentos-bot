@@ -7,16 +7,13 @@ const BUFFER_TOKEN = process.env.BUFFER_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
 const CALENDAR_ID = process.env.CALENDAR_ID;
 
-// Gmail (OAuth utilisateur)
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
 const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
 const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 
-// Sheets + Calendar (compte de service)
 const GOOGLE_SERVICE_EMAIL = process.env.GOOGLE_SERVICE_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
-// Ton chat ID pour les rappels
 const BOSS_CHAT_ID = "8291918824";
 
 console.log("Bot démarré, token:", TOKEN ? TOKEN.substring(0, 15) + "..." : "MANQUANT");
@@ -25,7 +22,7 @@ console.log("Sheets/Calendar service:", GOOGLE_SERVICE_EMAIL ? "OK" : "MANQUANT"
 
 // ─── TELEGRAM ────────────────────────────────────────────────────────────────
 function telegramRequest(method, body) {
-   new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = https.request(
       { hostname: "api.telegram.org", path: `/bot${TOKEN}/${method}`, method: "POST",
@@ -106,13 +103,13 @@ async function getUnreadEmails() {
     result += `📩 *De :* ${from.substring(0, 40)}\n📋 ${subject.substring(0, 50)}\n\n`;
   }
   return result;
-  async function getEmailsForSummary() {
+}
+
+async function getEmailsForSummary() {
   const token = await getGmailAccessToken();
   if (!token) return null;
-  // Emails reçus depuis 24h
   const list = await gmailRequest("/gmail/v1/users/me/messages?q=newer_than:1d&maxResults=15", token);
   if (!list.messages || list.messages.length === 0) return "empty";
-
   const emails = [];
   for (const msg of list.messages) {
     const detail = await gmailRequest(`/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token);
@@ -123,46 +120,6 @@ async function getUnreadEmails() {
     emails.push({ from, subject, snippet: snippet.substring(0, 100) });
   }
   return emails;
-}
-
-async function sendDailyEmailSummary() {
-  const emails = await getEmailsForSummary();
-  if (emails === null) { console.log("Résumé email: erreur auth"); return; }
-  if (emails === "empty") {
-    await sendMessage(BOSS_CHAT_ID, "📭 *Résumé du matin*\n\nAucun nouvel email dans les dernières 24h.");
-    return;
-  }
-
-  const emailList = emails.map((e, i) => `${i+1}. De: ${e.from}\n   Objet: ${e.subject}\n   Aperçu: ${e.snippet}`).join("\n\n");
-  const prompt = `Voici les emails reçus dans les dernières 24h par un restaurateur. Identifie UNIQUEMENT ceux qui sont importants (fournisseurs, clients, réservations, factures, urgences, administratif). Ignore les newsletters, pubs et spams.
-
-Fais un résumé court et clair en français, groupé par catégorie. Pour chaque email important, donne l'expéditeur et l'essentiel en une ligne. Si rien d'important, dis-le simplement.
-
-EMAILS:
-${emailList}`;
-
-  const summary = await askClaudeSimple(prompt);
-  await sendMessage(BOSS_CHAT_ID, `☀️ *Résumé de tes emails*\n\n${summary}`);
-  console.log("Résumé email envoyé");
-}
-
-// Appel Claude simple (sans historique, pour usage interne)
-async function askClaudeSimple(prompt) {
-  const body = JSON.stringify({
-    model: "claude-sonnet-4-6", max_tokens: 800,
-    messages: [{ role: "user", content: prompt }]
-  });
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      { hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY,
-                   "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) } },
-      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d).content?.[0]?.text || "Résumé indisponible."); } catch(e) { resolve("Résumé indisponible."); } }); }
-    );
-    req.on("error", () => resolve("Résumé indisponible."));
-    req.write(body);
-    req.end();
-  });
 }
 
 async function sendEmail(to, subject, body) {
@@ -188,7 +145,6 @@ async function getServiceAccessToken(scope) {
   sign.update(signingInput);
   const signature = sign.sign(GOOGLE_PRIVATE_KEY, "base64url");
   const jwt = `${signingInput}.${signature}`;
-
   return new Promise((resolve, reject) => {
     const body = new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt
@@ -224,15 +180,12 @@ async function createEvent(title, startISO, endISO, description) {
   const token = await getServiceAccessToken("https://www.googleapis.com/auth/calendar");
   if (!token) return "⚠️ Erreur de connexion à l'agenda.";
   const event = {
-    summary: title,
-    description: description || "",
+    summary: title, description: description || "",
     start: { dateTime: startISO, timeZone: "Europe/Paris" },
     end: { dateTime: endISO, timeZone: "Europe/Paris" }
   };
   const result = await calendarRequest(
-    `/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events`,
-    token, "POST", event
-  );
+    `/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events`, token, "POST", event);
   if (result.id) {
     const d = new Date(startISO);
     const dateStr = d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
@@ -250,7 +203,6 @@ async function listEvents(daysAhead) {
   const path = `/calendar/v3/calendars/${encodeURIComponent(CALENDAR_ID)}/events?timeMin=${now.toISOString()}&timeMax=${future.toISOString()}&singleEvents=true&orderBy=startTime`;
   const result = await calendarRequest(path, token);
   if (!result.items || result.items.length === 0) return "📅 Aucun événement prévu sur cette période.";
-
   let out = `📅 *Tes prochains rendez-vous :*\n\n`;
   for (const ev of result.items) {
     const start = ev.start.dateTime || ev.start.date;
@@ -262,14 +214,11 @@ async function listEvents(daysAhead) {
   return out;
 }
 
-// ─── RAPPELS (stockés en mémoire) ─────────────────────────────────────────────
-// Chaque rappel : { chatId, text, triggerTime (timestamp ms), sent }
+// ─── RAPPELS ──────────────────────────────────────────────────────────────────
 let reminders = [];
-
 function addReminder(chatId, text, triggerTime) {
   reminders.push({ chatId, text, triggerTime, sent: false });
 }
-
 function checkReminders() {
   const now = Date.now();
   for (const r of reminders) {
@@ -278,23 +227,18 @@ function checkReminders() {
       r.sent = true;
     }
   }
-  // Nettoyage des rappels envoyés
   reminders = reminders.filter(r => !r.sent);
 }
-setInterval(checkReminders, 30 * 1000); // vérifie toutes les 30s
+setInterval(checkReminders, 30 * 1000);
 
-// ─── TÂCHES RÉCURRENTES (stockées en mémoire) ─────────────────────────────────
-// Chaque tâche : { chatId, text, dayOfWeek (0-6), hour, minute, lastFired (dateStr) }
+// ─── TÂCHES RÉCURRENTES ───────────────────────────────────────────────────────
 let recurringTasks = [];
-
 function addRecurringTask(chatId, text, dayOfWeek, hour, minute) {
   recurringTasks.push({ type: "weekly", chatId, text, dayOfWeek, hour, minute, lastFired: null });
 }
-
 function addMonthlyTask(chatId, text, dayOfMonth, hour, minute) {
   recurringTasks.push({ type: "monthly", chatId, text, dayOfMonth, hour, minute, lastFired: null });
 }
-
 function checkRecurringTasks() {
   const parisNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
   const day = parisNow.getDay();
@@ -302,21 +246,18 @@ function checkRecurringTasks() {
   const m = parisNow.getMinutes();
   const todayStr = parisNow.toDateString();
   const dayOfMonth = parisNow.getDate();
-  // Dernier jour du mois : on regarde si demain c'est le 1er
   const tomorrow = new Date(parisNow);
   tomorrow.setDate(dayOfMonth + 1);
   const isLastDayOfMonth = tomorrow.getDate() === 1;
 
   for (const t of recurringTasks) {
     if (t.hour !== h || t.minute !== m || t.lastFired === todayStr) continue;
-
     let shouldFire = false;
     if (t.type === "weekly" && t.dayOfWeek === day) shouldFire = true;
     if (t.type === "monthly") {
       if (t.dayOfMonth === "last" && isLastDayOfMonth) shouldFire = true;
       else if (typeof t.dayOfMonth === "number" && t.dayOfMonth === dayOfMonth) shouldFire = true;
     }
-
     if (shouldFire) {
       const prefix = t.type === "monthly" ? "📅 *Rappel mensuel :*" : "🔁 *Tâche récurrente :*";
       sendMessage(t.chatId, `${prefix} ${t.text}`);
@@ -324,7 +265,7 @@ function checkRecurringTasks() {
     }
   }
 }
-setInterval(checkRecurringTasks, 60 * 1000); // vérifie chaque minute
+setInterval(checkRecurringTasks, 60 * 1000);
 
 // ─── SHEETS (RH) ──────────────────────────────────────────────────────────────
 function sheetsRequest(path, accessToken, method = "GET", body = null) {
@@ -347,9 +288,8 @@ async function addHoursToSheet(date, employee, hours, comment) {
   if (!token) return "⚠️ Erreur d'authentification Google Sheets.";
   const body = { values: [[date, employee, hours, comment || ""]] };
   const result = await sheetsRequest(
-`/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
-    token, "POST", body
-  );
+    `/v4/spreadsheets/${SHEET_ID}/values/A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    token, "POST", body);
   return result.updates ? "✅ Heures enregistrées !" : "⚠️ Erreur : " + JSON.stringify(result).substring(0, 150);
 }
 
@@ -409,7 +349,7 @@ function publishToBuffer(profileId, text, imageUrl) {
   });
 }
 
-// ─── AGENTS ──────────────────────────────────────────────────────────────────
+// ─── CLAUDE ──────────────────────────────────────────────────────────────────
 const AGENTS = {
   temps: {
     emoji: "🗓️", name: "Agent Temps",
@@ -421,20 +361,18 @@ RÈGLE ABSOLUE — CRÉER UN ÉVÉNEMENT : quand l'utilisateur veut ajouter un r
 
 RÈGLE ABSOLUE — VOIR L'AGENDA : quand l'utilisateur veut consulter ses rendez-vous, réponds UNIQUEMENT avec :
 {"action":"list_events","days":7}
-(ajuste "days" selon la demande : "aujourd'hui"=1, "cette semaine"=7, "ce mois"=31)
 
 RÈGLE ABSOLUE — RAPPEL PONCTUEL : quand l'utilisateur veut être rappelé d'une chose à un moment précis, réponds UNIQUEMENT avec :
 {"action":"add_reminder","text":"le rappel","datetime":"AAAA-MM-JJTHH:MM:SS"}
 
 RÈGLE ABSOLUE — TÂCHE RÉCURRENTE HEBDOMADAIRE : quand l'utilisateur veut un rappel qui se répète chaque semaine, réponds UNIQUEMENT avec :
 {"action":"add_recurring","text":"la tâche","day":"lundi","hour":9,"minute":0}
-(day = jour de la semaine en français)
 
 RÈGLE ABSOLUE — TÂCHE RÉCURRENTE MENSUELLE : quand l'utilisateur veut un rappel qui se répète chaque mois, réponds UNIQUEMENT avec :
 {"action":"add_monthly","text":"la tâche","dayOfMonth":"last","hour":23,"minute":0}
-(dayOfMonth = "last" pour le dernier jour du mois, ou un nombre de 1 à 31 pour un jour précis)
+(dayOfMonth = "last" pour le dernier jour du mois, ou un nombre de 1 à 31)
 
-Pour toute autre demande (conseils d'organisation, questions), réponds normalement en français, de façon concise.
+Pour toute autre demande, réponds normalement en français, de façon concise.
 NE JAMAIS expliquer le fonctionnement technique.`
   },
   social: {
@@ -494,6 +432,57 @@ async function askClaude(system, history, message) {
   });
 }
 
+async function askClaudeSimple(prompt) {
+  const body = JSON.stringify({
+    model: "claude-sonnet-4-6", max_tokens: 800,
+    messages: [{ role: "user", content: prompt }]
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY,
+                   "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) } },
+      (res) => { let d = ""; res.on("data", c => d += c); res.on("end", () => { try { resolve(JSON.parse(d).content?.[0]?.text || "Résumé indisponible."); } catch(e) { resolve("Résumé indisponible."); } }); }
+    );
+    req.on("error", () => resolve("Résumé indisponible."));
+    req.write(body);
+    req.end();
+  });
+}
+
+// ─── RÉSUMÉ EMAILS QUOTIDIEN ──────────────────────────────────────────────────
+async function sendDailyEmailSummary() {
+  const emails = await getEmailsForSummary();
+  if (emails === null) { console.log("Résumé email: erreur auth"); return; }
+  if (emails === "empty") {
+    await sendMessage(BOSS_CHAT_ID, "📭 *Résumé du matin*\n\nAucun nouvel email dans les dernières 24h.");
+    return;
+  }
+  const emailList = emails.map((e, i) => `${i+1}. De: ${e.from}\n   Objet: ${e.subject}\n   Aperçu: ${e.snippet}`).join("\n\n");
+  const prompt = `Voici les emails reçus dans les dernières 24h par un restaurateur. Identifie UNIQUEMENT ceux qui sont importants (fournisseurs, clients, réservations, factures, urgences, administratif). Ignore les newsletters, pubs et spams.
+
+Fais un résumé court et clair en français, groupé par catégorie. Pour chaque email important, donne l'expéditeur et l'essentiel en une ligne. Si rien d'important, dis-le simplement.
+
+EMAILS:
+${emailList}`;
+  const summary = await askClaudeSimple(prompt);
+  await sendMessage(BOSS_CHAT_ID, `☀️ *Résumé de tes emails*\n\n${summary}`);
+  console.log("Résumé email envoyé");
+}
+
+let lastEmailSummaryDate = null;
+function checkDailyEmailSummary() {
+  const parisNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
+  const h = parisNow.getHours();
+  const m = parisNow.getMinutes();
+  const todayStr = parisNow.toDateString();
+  if (h === 10 && m < 5 && lastEmailSummaryDate !== todayStr) {
+    lastEmailSummaryDate = todayStr;
+    sendDailyEmailSummary().catch(e => console.error("Erreur résumé email:", e));
+  }
+}
+setInterval(checkDailyEmailSummary, 60 * 1000);
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const JOURS = { "dimanche":0, "lundi":1, "mardi":2, "mercredi":3, "jeudi":4, "vendredi":5, "samedi":6 };
 
@@ -540,8 +529,7 @@ async function handleUpdate(update) {
     const agent = AGENTS[state.agent];
     const reply = await askClaude(agent.system, state.history, text);
 
-   try {
-      // Extraction robuste du JSON même s'il y a du texte autour
+    try {
       let jsonStr = reply.trim();
       const firstBrace = jsonStr.indexOf("{");
       const lastBrace = jsonStr.lastIndexOf("}");
@@ -550,7 +538,6 @@ async function handleUpdate(update) {
       }
       const parsed = JSON.parse(jsonStr);
 
-      // ─ AGENT TEMPS ─
       if (parsed.action === "create_event") {
         await sendMessage(chatId, "📅 Création de l'événement...");
         await sendMessage(chatId, await createEvent(parsed.title, parsed.start, parsed.end, parsed.description));
@@ -569,7 +556,7 @@ async function handleUpdate(update) {
         await sendMessage(chatId, `⏰ *Rappel programmé !*\n\n"${parsed.text}"\n📆 ${when}`);
         return;
       }
-    if (parsed.action === "add_recurring") {
+      if (parsed.action === "add_recurring") {
         const dayNum = JOURS[parsed.day.toLowerCase()];
         if (dayNum === undefined) { await sendMessage(chatId, "⚠️ Jour non reconnu."); return; }
         addRecurringTask(chatId, parsed.text, dayNum, parsed.hour, parsed.minute || 0);
@@ -582,8 +569,6 @@ async function handleUpdate(update) {
         await sendMessage(chatId, `📅 *Rappel mensuel créé !*\n\n"${parsed.text}"\n📆 ${quand} à ${String(parsed.hour).padStart(2,"0")}h${String(parsed.minute||0).padStart(2,"0")}`);
         return;
       }
-
-      // ─ AGENT SOCIAL ─
       if (parsed.action === "publish_instagram") {
         await sendMessage(chatId, "📤 Publication en cours sur Instagram...");
         const profiles = await getBufferProfiles();
@@ -593,8 +578,6 @@ async function handleUpdate(update) {
         await sendMessage(chatId, result.success ? "✅ *Post publié sur Instagram !*" : "⚠️ Erreur : " + (result.message || "Erreur inconnue"));
         return;
       }
-
-      // ─ AGENT EMAIL ─
       if (parsed.action === "read_emails") {
         await sendMessage(chatId, "📬 Récupération de tes emails...");
         await sendMessage(chatId, await getUnreadEmails());
@@ -605,8 +588,6 @@ async function handleUpdate(update) {
         await sendMessage(chatId, await sendEmail(parsed.to, parsed.subject, parsed.body));
         return;
       }
-
-      // ─ AGENT RH ─
       if (parsed.action === "log_hours") {
         await sendMessage(chatId, "📝 Enregistrement des heures...");
         await sendMessage(chatId, await addHoursToSheet(parsed.date, parsed.employee, parsed.hours, parsed.comment));
@@ -630,21 +611,7 @@ async function handleUpdate(update) {
     await sendMessage(chatId, "⚠️ Une erreur s'est produite. Réessayez.");
   }
 }
-// ─── RÉSUMÉ EMAILS QUOTIDIEN À 10H (heure de Paris) ───────────────────────────
-let lastEmailSummaryDate = null;
-function checkDailyEmailSummary() {
-  const parisNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
-  const h = parisNow.getHours();
-  const m = parisNow.getMinutes();
-  const todayStr = parisNow.toDateString();
 
-  // Déclenche une seule fois entre 10h00 et 10h04
-  if (h === 10 && m < 5 && lastEmailSummaryDate !== todayStr) {
-    lastEmailSummaryDate = todayStr;
-    sendDailyEmailSummary().catch(e => console.error("Erreur résumé email:", e));
-  }
-}
-setInterval(checkDailyEmailSummary, 60 * 1000); // vérifie chaque minute
 // ─── POLLING ─────────────────────────────────────────────────────────────────
 let offset = 0;
 async function poll() {
