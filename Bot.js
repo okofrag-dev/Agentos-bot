@@ -705,3 +705,145 @@ async function poll() {
 }
 
 poll();
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PORTE WEB  /ask   —   AJOUT pour l'interface Jarvis (Netlify)
+//  100% additif : ne modifie AUCUNE ligne du bot Telegram ci-dessus.
+//  Réutilise les fonctions existantes (mails, heures, agenda, social…).
+// ═══════════════════════════════════════════════════════════════════════════
+const http = require("http");
+
+const JARVIS_API_KEY = process.env.JARVIS_API_KEY || "";
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+const WEB_PORT = process.env.PORT || 3000;
+
+// Prompt unifié : Jarvis choisit l'agent tout seul (plus de menu à cliquer).
+const JARVIS_WEB_SYSTEM = `Tu es JARVIS, le majordome personnel de Damien (restaurateur : "Pizza Top" et "Le Skipper"). Efficace, chaleureux, bref. Toujours en français.
+Selon la demande, tu réponds NORMALEMENT en français, OU tu renvoies UNIQUEMENT un JSON d'action (rien autour).
+
+LECTURE (exécuter directement) :
+- Emails non lus : {"action":"read_emails"}
+- Voir l'agenda : {"action":"list_events","days":7}
+- Bilan des heures d'un mois : {"action":"monthly_report","month":MM,"year":AAAA}
+
+ÉCRITURE / ENVOI (⚠️ demander confirmation en français AVANT ; n'émettre le JSON QUE si Damien confirme "oui/ok/valide/c'est bon") :
+- Envoyer un email : {"action":"send_email","to":"email","subject":"objet","body":"contenu"}
+- Enregistrer des heures : {"action":"log_hours","date":"JJ/MM/AAAA","employee":"prénom","hours":"X","comment":""}
+- Créer un événement agenda : {"action":"create_event","title":"titre","start":"AAAA-MM-JJTHH:MM:SS","end":"AAAA-MM-JJTHH:MM:SS","description":""}
+- Rappel ponctuel : {"action":"add_reminder","text":"...","datetime":"AAAA-MM-JJTHH:MM:SS"}
+- Rappel hebdomadaire : {"action":"add_recurring","text":"...","day":"lundi","hour":9,"minute":0}
+- Rappel mensuel : {"action":"add_monthly","text":"...","dayOfMonth":"last","hour":23,"minute":0}
+- Publier sur Instagram : {"action":"publish_instagram","text":"...","image_url":"..."}
+- Générer une image : {"action":"generate_image","prompt":"description en anglais, style photo appétissante restaurant"}
+
+RÈGLES : additionne les créneaux d'heures et convertis en décimal (17h→23h30 = 6.5). Calcule start/end à partir de la date/heure fournie (1h par défaut). Ne montre JAMAIS de JSON en dehors de ces cas. N'explique jamais le fonctionnement technique.`;
+
+// Exécute une action et RENVOIE un texte (version web). Les rappels partent sur ton Telegram (BOSS_CHAT_ID).
+async function executeActionWeb(parsed) {
+  switch (parsed.action) {
+    case "read_emails":    return { reply: await getUnreadEmails(), module: "mails" };
+    case "send_email":     return { reply: await sendEmail(parsed.to, parsed.subject, parsed.body), module: "mails" };
+    case "log_hours":      return { reply: await addHoursToSheet(parsed.date, parsed.employee, parsed.hours, parsed.comment), module: "heures" };
+    case "monthly_report": return { reply: await getMonthlyReport(parsed.month, parsed.year), module: "heures" };
+    case "create_event":   return { reply: await createEvent(parsed.title, parsed.start, parsed.end, parsed.description), module: "agenda" };
+    case "list_events":    return { reply: await listEvents(parsed.days), module: "agenda" };
+    case "add_reminder": {
+      addReminder(BOSS_CHAT_ID, parsed.text, new Date(parsed.datetime).getTime());
+      const when = new Date(parsed.datetime).toLocaleString("fr-FR", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+      return { reply: `⏰ Rappel programmé : "${parsed.text}" — ${when} (je te préviendrai sur Telegram).`, module: "agenda" };
+    }
+    case "add_recurring": {
+      const dayNum = JOURS[(parsed.day || "").toLowerCase()];
+      if (dayNum === undefined) return { reply: "⚠️ Jour non reconnu.", module: "agenda" };
+      addRecurringTask(BOSS_CHAT_ID, parsed.text, dayNum, parsed.hour, parsed.minute || 0);
+      return { reply: `🔁 Tâche hebdo créée : "${parsed.text}" chaque ${parsed.day} à ${String(parsed.hour).padStart(2, "0")}h${String(parsed.minute || 0).padStart(2, "0")}.`, module: "agenda" };
+    }
+    case "add_monthly": {
+      addMonthlyTask(BOSS_CHAT_ID, parsed.text, parsed.dayOfMonth, parsed.hour, parsed.minute || 0);
+      const quand = parsed.dayOfMonth === "last" ? "le dernier jour du mois" : `le ${parsed.dayOfMonth} du mois`;
+      return { reply: `📅 Rappel mensuel créé : "${parsed.text}" ${quand} à ${String(parsed.hour).padStart(2, "0")}h${String(parsed.minute || 0).padStart(2, "0")}.`, module: "agenda" };
+    }
+    case "generate_image": {
+      const image = await generateImage(parsed.prompt);
+      if (image && (image.b64 || image.url))
+        return { reply: "✨ Visuel généré.", module: "social", image: image.b64 ? ("data:image/png;base64," + image.b64) : image.url };
+      return { reply: "⚠️ Erreur lors de la génération de l'image.", module: "social" };
+    }
+    case "publish_instagram": {
+      const profiles = await getBufferProfiles();
+      const insta = Array.isArray(profiles) ? profiles.find(p => p.service === "instagram") : null;
+      if (!insta) return { reply: "⚠️ Aucun compte Instagram trouvé sur Buffer.", module: "social" };
+      const result = await publishToBuffer(insta.id, parsed.text, parsed.image_url);
+      return { reply: result.success ? "✅ Post publié sur Instagram !" : "⚠️ Erreur : " + (result.message || "inconnue"), module: "social" };
+    }
+    default: return null;
+  }
+}
+
+// Cœur web : message + historique -> { reply, module, action, image }
+async function runJarvisWeb(message, history) {
+  const raw = await askClaude(JARVIS_WEB_SYSTEM, history || [], message);
+  try {
+    const first = raw.indexOf("{"), last = raw.lastIndexOf("}");
+    if (first !== -1 && last !== -1) {
+      const parsed = JSON.parse(raw.substring(first, last + 1));
+      if (parsed && parsed.action) {
+        const done = await executeActionWeb(parsed);
+        if (done) return { reply: done.reply, module: done.module, action: parsed.action, image: done.image || null };
+      }
+    }
+  } catch (e) { /* pas un JSON -> réponse texte normale */ }
+  return { reply: raw, module: "assistant", action: null, image: null };
+}
+
+function jarvisCors() {
+  return {
+    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
+    "Access-Control-Max-Age": "86400"
+  };
+}
+function jarvisJson(res, status, obj) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...jarvisCors() });
+  res.end(JSON.stringify(obj));
+}
+function jarvisKeyValid(provided) {
+  if (!JARVIS_API_KEY || !provided) return false;
+  const a = Buffer.from(String(provided)), b = Buffer.from(JARVIS_API_KEY);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+function jarvisAuthorized(req) {
+  const auth = req.headers["authorization"] || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  return jarvisKeyValid(bearer) || jarvisKeyValid(req.headers["x-api-key"]);
+}
+
+http.createServer((req, res) => {
+  const u = new URL(req.url, `http://${req.headers.host}`);
+  if (req.method === "OPTIONS") { res.writeHead(204, jarvisCors()); res.end(); return; }
+  if (req.method === "GET" && u.pathname === "/health") return jarvisJson(res, 200, { ok: true, service: "jarvis" });
+  if (req.method === "GET" && u.pathname === "/") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", ...jarvisCors() });
+    res.end("<h1>🫡 Jarvis backend en ligne</h1><p>Porte /ask " + (JARVIS_API_KEY ? "protégée." : "<b>désactivée</b> (ajoute JARVIS_API_KEY).") + "</p>");
+    return;
+  }
+  if (req.method === "POST" && u.pathname === "/ask") {
+    if (!JARVIS_API_KEY) return jarvisJson(res, 500, { error: "JARVIS_API_KEY non configurée sur le serveur." });
+    if (!jarvisAuthorized(req)) return jarvisJson(res, 401, { error: "Clé invalide ou absente." });
+    let body = "", tooBig = false;
+    req.on("data", (c) => { body += c; if (body.length > 100000) { tooBig = true; req.destroy(); } });
+    req.on("end", async () => {
+      if (tooBig) return;
+      let p; try { p = JSON.parse(body || "{}"); } catch (e) { return jarvisJson(res, 400, { error: "JSON invalide." }); }
+      const message = (p.message || "").toString().trim();
+      const history = Array.isArray(p.history) ? p.history.slice(-20) : [];
+      if (!message) return jarvisJson(res, 400, { error: "Champ 'message' manquant." });
+      try { return jarvisJson(res, 200, await runJarvisWeb(message, history)); }
+      catch (e) { console.error("Erreur /ask:", e); return jarvisJson(res, 500, { error: "Souci interne, réessaie." }); }
+    });
+    return;
+  }
+  jarvisJson(res, 404, { error: "Route inconnue." });
+}).listen(WEB_PORT, () => console.log(`Porte web /ask à l'écoute sur le port ${WEB_PORT}`));
